@@ -3,7 +3,9 @@
 // Uses f(z) = z^n - 1 with configurable n.
 
 struct Params {
-    bounds: vec4<f32>,
+    center_hi: vec2<f32>,
+    center_lo: vec2<f32>,
+    pixel_step: vec2<f32>,
     resolution: vec2<u32>,
     max_iter: u32,
     fractal_type: u32,
@@ -12,17 +14,37 @@ struct Params {
     relaxation: f32,
     color_mode: u32,
     num_roots: u32,
-    sample_offset: vec2<f32>,    // sub-pixel offset in pixel units
+    sample_offset: vec2<f32>,
     sample_weight: f32,
-    stride: u32,             // buffer row width in pixels (>= resolution.x)
-    _pad0: u32,
-    _pad1: u32,
+    stride: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> iterations: array<f32>;
 @group(0) @binding(2) var<storage, read_write> final_z: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read> roots: array<vec2<f32>>;
+
+// ── Double-single arithmetic (for coordinate mapping only) ──────────────────
+// Each value is (hi, lo) where value = hi + lo (~48 bits of mantissa).
+
+fn two_sum(a: f32, b: f32) -> vec2<f32> {
+    let s = a + b;
+    let v = s - a;
+    let e = (a - (s - v)) + (b - v);
+    return vec2<f32>(s, e);
+}
+
+fn two_prod(a: f32, b: f32) -> vec2<f32> {
+    let p = a * b;
+    let e = fma(a, b, -p);
+    return vec2<f32>(p, e);
+}
+
+fn ds_add(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    let s = two_sum(a.x, b.x);
+    let e = a.y + b.y + s.y;
+    return two_sum(s.x, e);
+}
 
 // ── Complex arithmetic ───────────────────────────────────────────────────────
 
@@ -85,13 +107,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let relax = params.relaxation;
     let max_i = params.max_iter;
 
-    // Map pixel to complex plane with sub-pixel offset for supersampling
-    let fx = (f32(x) + params.sample_offset.x) / f32(w - 1u);
-    let fy = (f32(y) + params.sample_offset.y) / f32(h - 1u);
-    let pixel = vec2<f32>(
-        params.bounds.x + fx * (params.bounds.y - params.bounds.x),
-        params.bounds.z + fy * (params.bounds.w - params.bounds.z),
-    );
+    // Map pixel to complex plane using double-single precision for deep zoom
+    let dx_pixels = f32(x) + params.sample_offset.x - f32(w - 1u) * 0.5;
+    let dy_pixels = f32(y) + params.sample_offset.y - f32(h - 1u) * 0.5;
+    let dx = two_prod(dx_pixels, params.pixel_step.x);
+    let dy = two_prod(dy_pixels, params.pixel_step.y);
+    let pixel_r = ds_add(vec2<f32>(params.center_hi.x, params.center_lo.x), dx);
+    let pixel_i = ds_add(vec2<f32>(params.center_hi.y, params.center_lo.y), dy);
+    let pixel = vec2<f32>(pixel_r.x, pixel_i.x);
 
     var z: vec2<f32>;
     var nova_c: vec2<f32>;
@@ -123,8 +146,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var prev_step_mag2: f32 = 1e10;
 
     for (var i: u32 = 0u; i < max_i; i++) {
-        let step = cdiv(ff[0], ff[1]);
-        let z_new = z - relax * step + nova_c;
+        let step_val = cdiv(ff[0], ff[1]);
+        let z_new = z - relax * step_val + nova_c;
 
         // Convergence: |z_new - z|² < tol²
         // This works for BOTH Newton (c=0, converges to f(z)=0) and Nova

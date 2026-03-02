@@ -66,7 +66,7 @@ impl FractalType {
         )
     }
 
-    pub fn default_bounds(&self) -> [f32; 4] {
+    pub fn default_bounds(&self) -> [f64; 4] {
         match self {
             FractalType::Mandelbrot => [-2.5, 1.0, -1.25, 1.25],
             FractalType::Julia => [-2.0, 2.0, -1.5, 1.5],
@@ -133,7 +133,7 @@ pub struct Controls {
 #[derive(Debug, Clone)]
 pub struct FractalParams {
     pub fractal_type: FractalType,
-    pub bounds: [f32; 4], // x_min, x_max, y_min, y_max
+    pub bounds: [f64; 4], // x_min, x_max, y_min, y_max (f64 for zoom precision)
     pub max_iter: u32,
     pub julia_c: [f32; 2],   // [re, im]
     pub power: f32,           // Multibrot exponent
@@ -171,12 +171,24 @@ impl FractalParams {
     }
 
     /// Build the GPU uniform data (must match Params struct in WGSL).
-    /// `display_w` and `display_h` are the visible display resolution.
-    /// `stride` is the buffer row width in pixels (>= display_w, aligned for wgpu).
-    /// Sub-pixel offsets for multi-pass supersampling are set separately.
+    /// Computes center (split into hi/lo f32 pair for double-single precision)
+    /// and pixel_step from the f64 bounds.
     pub fn to_gpu_params(&self, display_w: u32, display_h: u32, stride: u32) -> GpuParams {
+        let cx = (self.bounds[0] + self.bounds[1]) / 2.0;
+        let cy = (self.bounds[2] + self.bounds[3]) / 2.0;
+        let step_x = (self.bounds[1] - self.bounds[0]) / (display_w as f64 - 1.0).max(1.0);
+        let step_y = (self.bounds[3] - self.bounds[2]) / (display_h as f64 - 1.0).max(1.0);
+
+        // Split f64 center into f32 hi + f32 lo (Dekker splitting)
+        let cx_hi = cx as f32;
+        let cx_lo = (cx - cx_hi as f64) as f32;
+        let cy_hi = cy as f32;
+        let cy_lo = (cy - cy_hi as f64) as f32;
+
         GpuParams {
-            bounds: self.bounds,
+            center_hi: [cx_hi, cy_hi],
+            center_lo: [cx_lo, cy_lo],
+            pixel_step: [step_x as f32, step_y as f32],
             resolution: [display_w, display_h],
             max_iter: self.max_iter,
             fractal_type: self.fractal_type.shader_index(),
@@ -192,7 +204,6 @@ impl FractalParams {
             sample_offset: [0.0, 0.0],
             sample_weight: 1.0,
             stride,
-            _pad: [0; 2],
         }
     }
 }
@@ -221,49 +232,64 @@ pub fn mitchell_1d(x: f32) -> f32 {
 
 /// Pre-compute sub-pixel sample positions and Mitchell-Netravali weights.
 /// Returns (offset_x, offset_y, weight) tuples in pixel units.
-/// Grid spans [-0.5, +0.5] pixels (endpoint-inclusive); filter radius = 0.75.
+///
+/// The Mitchell filter (B=C=1/3) has support [-2, 2] with negative lobes
+/// in [1, 2] that provide sharpening. To activate these lobes, the grid
+/// must extend beyond ±1 pixel from center.
+///
+/// Quality levels:
+///   ss=1: Off (1 sample at center)
+///   ss=2: 4x4 grid [-1.5, +1.5] — 16 samples, sharp Mitchell with negative lobes
+///   ss=3: 6x6 grid [-2.0, +2.0] — 36 samples, full Mitchell support
 pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
-    let radius: f32 = 0.75;
-    let mut samples = Vec::with_capacity((ss * ss) as usize);
-    for sy in 0..ss {
-        for sx in 0..ss {
-            // Endpoint-inclusive grid: ss=1 → 0.0, ss=2 → ±0.5, ss=3 → -0.5, 0.0, +0.5
-            let offset_x = if ss == 1 {
-                0.0
-            } else {
-                -0.5 + (sx as f32) / (ss as f32 - 1.0)
-            };
-            let offset_y = if ss == 1 {
-                0.0
-            } else {
-                -0.5 + (sy as f32) / (ss as f32 - 1.0)
-            };
-            // Separable 2D filter: w(x,y) = w(x) * w(y), scaled to filter radius
-            let wx = mitchell_1d(offset_x / radius * 2.0);
-            let wy = mitchell_1d(offset_y / radius * 2.0);
+    if ss <= 1 {
+        // Single sample at center
+        return vec![(0.0, 0.0, 1.0)];
+    }
+
+    // Grid size and extent based on quality level
+    let (grid_n, extent): (u32, f32) = match ss {
+        2 => (4, 1.5), // 4x4 over [-1.5, 1.5] — activates negative lobes
+        _ => (6, 2.0), // 6x6 over [-2.0, 2.0] — full Mitchell support
+    };
+
+    let mut samples = Vec::with_capacity((grid_n * grid_n) as usize);
+    for sy in 0..grid_n {
+        for sx in 0..grid_n {
+            let offset_x = -extent + (sx as f32) * (2.0 * extent) / (grid_n as f32 - 1.0);
+            let offset_y = -extent + (sy as f32) * (2.0 * extent) / (grid_n as f32 - 1.0);
+            // Separable 2D filter: w(x,y) = w(x) * w(y)
+            let wx = mitchell_1d(offset_x);
+            let wy = mitchell_1d(offset_y);
             let w = wx * wy;
-            samples.push((offset_x, offset_y, w));
+            // Skip samples with negligible weight (outside support)
+            if w.abs() > 1e-6 {
+                samples.push((offset_x, offset_y, w));
+            }
         }
     }
     samples
 }
 
 /// GPU-side uniform struct. Must match WGSL layout exactly.
-/// Total 80 bytes, aligned to 16 (vec4<f32> max alignment).
+/// Total 80 bytes. Uses center + pixel_step instead of raw bounds
+/// to enable double-single (emulated f64) precision in shaders.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuParams {
-    pub bounds: [f32; 4],           // 16 bytes (offset 0)
-    pub resolution: [u32; 2],       // 8 bytes  (offset 16) — OUTPUT resolution
-    pub max_iter: u32,              // 4 bytes  (offset 24)
-    pub fractal_type: u32,          // 4 bytes  (offset 28)
-    pub julia_c: [f32; 2],          // 8 bytes  (offset 32)
-    pub power: f32,                 // 4 bytes  (offset 40)
-    pub relaxation: f32,            // 4 bytes  (offset 44)
-    pub color_mode: u32,            // 4 bytes  (offset 48)
-    pub num_roots: u32,             // 4 bytes  (offset 52)
-    pub sample_offset: [f32; 2],    // 8 bytes  (offset 56) — sub-pixel offset in pixel units
-    pub sample_weight: f32,         // 4 bytes  (offset 64)
-    pub stride: u32,                // 4 bytes  (offset 68) — buffer row stride in pixels (≥ resolution.x)
-    pub _pad: [u32; 2],             // 8 bytes  (offset 72) → total 80 bytes
+    pub center_hi: [f32; 2],       // 8 bytes  (offset 0)  — view center (high part)
+    pub center_lo: [f32; 2],       // 8 bytes  (offset 8)  — view center (low part, sub-ULP)
+    pub pixel_step: [f32; 2],      // 8 bytes  (offset 16) — complex units per pixel
+    pub resolution: [u32; 2],      // 8 bytes  (offset 24) — OUTPUT resolution
+    pub max_iter: u32,             // 4 bytes  (offset 32)
+    pub fractal_type: u32,         // 4 bytes  (offset 36)
+    pub julia_c: [f32; 2],        // 8 bytes  (offset 40)
+    pub power: f32,                // 4 bytes  (offset 48)
+    pub relaxation: f32,           // 4 bytes  (offset 52)
+    pub color_mode: u32,           // 4 bytes  (offset 56)
+    pub num_roots: u32,            // 4 bytes  (offset 60)
+    pub sample_offset: [f32; 2],   // 8 bytes  (offset 64) — sub-pixel offset in pixel units
+    pub sample_weight: f32,        // 4 bytes  (offset 72)
+    pub stride: u32,               // 4 bytes  (offset 76)
 }
+// Total: 80 bytes, no padding needed

@@ -42,10 +42,8 @@ pub struct GpuState {
     colorize_bind_group_layout: wgpu::BindGroupLayout,
     finalize_bind_group_layout: wgpu::BindGroupLayout,
 
-    // Display texture
-    pub texture: wgpu::Texture,
-    pub texture_view: wgpu::TextureView,
-    pub texture_id: Option<egui::TextureId>,
+    // CPU readback buffer (for egui::ColorImage upload)
+    readback_buffer: wgpu::Buffer,
 
     // Current dimensions
     pub width: u32,           // aligned buffer stride (multiple of 64)
@@ -227,8 +225,13 @@ impl GpuState {
             ],
         });
 
-        // Display texture (matches display dimensions, not buffer stride)
-        let (texture, texture_view) = create_texture(device, display_width, height);
+        // CPU readback buffer (same size as output_buffer)
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: out_pixels * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
         GpuState {
             device: device.clone(),
@@ -251,9 +254,7 @@ impl GpuState {
             newton_bind_group_layout,
             colorize_bind_group_layout,
             finalize_bind_group_layout,
-            texture,
-            texture_view,
-            texture_id: None,
+            readback_buffer,
             width,
             display_width,
             height,
@@ -305,11 +306,12 @@ impl GpuState {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-
-            let (texture, texture_view) = create_texture(&self.device, display_w, height);
-            self.texture = texture;
-            self.texture_view = texture_view;
-            self.texture_id = None; // Force re-registration with egui
+            self.readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback"),
+                size: out_pixels * 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
 
             // Rebuild bind groups with new buffers
             self.escape_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -467,29 +469,12 @@ impl GpuState {
                 pass.dispatch_workgroups(wg_x, wg_y, 1);
             }
 
-            // Copy output buffer -> texture
-            // Buffer rows are `width` (aligned stride) pixels wide;
-            // texture is `display_width` pixels wide — copy only the visible portion.
-            encoder.copy_buffer_to_texture(
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &self.output_buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * self.width), // stride in bytes (aligned)
-                        rows_per_image: Some(self.height),
-                    },
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: self.display_width, // copy only visible pixels
-                    height: self.height,
-                    depth_or_array_layers: 1,
-                },
+            // Copy output buffer -> readback buffer for CPU readback
+            let buf_size = (self.width as u64) * (self.height as u64) * 4;
+            encoder.copy_buffer_to_buffer(
+                &self.output_buffer, 0,
+                &self.readback_buffer, 0,
+                buf_size,
             );
 
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -499,97 +484,43 @@ impl GpuState {
         self.last_render_ms = start.elapsed().as_secs_f64() * 1000.0;
     }
 
-    /// Register the texture with egui for display.
-    pub fn ensure_texture_registered(
-        &mut self,
-        renderer: &mut eframe::egui_wgpu::Renderer,
-    ) {
-        if self.texture_id.is_none() {
-            let id = renderer.register_native_texture(
-                &self.device,
-                &self.texture_view,
-                wgpu::FilterMode::Linear,
-            );
-            self.texture_id = Some(id);
-        }
-    }
-
-    /// Update the egui texture after a render.
-    pub fn update_texture(&mut self, renderer: &mut eframe::egui_wgpu::Renderer) {
-        if let Some(id) = self.texture_id {
-            renderer.update_egui_texture_from_wgpu_texture(
-                &self.device,
-                &self.texture_view,
-                wgpu::FilterMode::Linear,
-                id,
-            );
-        }
-    }
-
-    /// Export the current fractal to a PNG file.
-    /// Reads from the display texture (display_width × height).
-    pub fn export_png(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Readback buffer needs aligned row stride for copy_texture_to_buffer
-        let readback_stride = align_width(self.display_width);
-        let readback_size = (readback_stride as u64) * (self.height as u64) * 4;
-        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: readback_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * readback_stride),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.display_width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        let slice = readback_buffer.slice(..);
+    /// Read pixels back from the GPU readback buffer.
+    /// Returns RGBA bytes at display_width × height (padding stripped).
+    pub fn read_pixels(&self) -> Vec<u8> {
+        let slice = self.readback_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
         self.device.poll(wgpu::Maintain::Wait);
-        rx.recv()??;
+        rx.recv().unwrap().unwrap();
 
         let data = slice.get_mapped_range();
-        // If readback stride > display_width, strip padding from each row
-        if readback_stride == self.display_width {
-            let img = image::RgbaImage::from_raw(self.display_width, self.height, data.to_vec())
-                .ok_or("Failed to create image")?;
-            img.save(path)?;
+        let stride = self.width;
+        let dw = self.display_width;
+
+        let pixels = if stride == dw {
+            data[..(dw * self.height * 4) as usize].to_vec()
         } else {
-            let mut pixels = Vec::with_capacity((self.display_width * self.height * 4) as usize);
+            let mut out = Vec::with_capacity((dw * self.height * 4) as usize);
             for row in 0..self.height {
-                let start = (row * readback_stride * 4) as usize;
-                let end = start + (self.display_width * 4) as usize;
-                pixels.extend_from_slice(&data[start..end]);
+                let start = (row * stride * 4) as usize;
+                let end = start + (dw * 4) as usize;
+                out.extend_from_slice(&data[start..end]);
             }
-            let img = image::RgbaImage::from_raw(self.display_width, self.height, pixels)
-                .ok_or("Failed to create image")?;
-            img.save(path)?;
-        }
+            out
+        };
+        drop(data);
+        self.readback_buffer.unmap();
+        pixels
+    }
+
+    /// Export the current fractal to a PNG file.
+    pub fn export_png(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let pixels = self.read_pixels();
+        let img = image::RgbaImage::from_raw(self.display_width, self.height, pixels)
+            .ok_or("Failed to create image")?;
+        img.save(path)?;
         Ok(())
     }
 }
@@ -643,23 +574,3 @@ fn create_pipeline(
     })
 }
 
-fn create_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("fractal output"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
-}

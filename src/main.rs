@@ -73,7 +73,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     // Parse --bounds x_min,x_max,y_min,y_max
     if let Some(pos) = args.iter().position(|a| a == "--bounds") {
         if let Some(val) = args.get(pos + 1) {
-            let parts: Vec<f32> = val.split(',').filter_map(|s| s.parse().ok()).collect();
+            let parts: Vec<f64> = val.split(',').filter_map(|s| s.parse().ok()).collect();
             if parts.len() == 4 {
                 params.bounds = [parts[0], parts[1], parts[2], parts[3]];
             }
@@ -363,7 +363,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let data = slice.get_mapped_range();
     let img = image::RgbaImage::from_raw(width, height, data.to_vec()).unwrap();
     img.save(path).unwrap();
-    let ss_info = if ss > 1 { format!(" ({}x{} SS, {} passes)", ss, ss, ss * ss) } else { String::new() };
+    let ss_info = if ss > 1 { format!(" ({} passes, Mitchell sharp)", samples.len()) } else { String::new() };
     println!("Done: {}x{}{} -> {}", width, height, ss_info, path);
 
     Ok(())

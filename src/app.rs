@@ -7,12 +7,15 @@ pub struct FractalApp {
     gpu: Option<GpuState>,
     params: FractalParams,
     prev_params_hash: u64,
-    history: Vec<[f32; 4]>, // bounds history for undo
+    history: Vec<[f64; 4]>, // bounds history for undo
     needs_render: bool,
+
+    // egui-managed texture (CPU readback from GPU)
+    texture_handle: Option<egui::TextureHandle>,
 
     // Drag state
     drag_start: Option<egui::Pos2>,
-    drag_bounds: Option<[f32; 4]>,
+    drag_bounds: Option<[f64; 4]>,
 
     // Export
     export_path: String,
@@ -51,6 +54,7 @@ impl FractalApp {
             prev_params_hash: 0,
             history: Vec::new(),
             needs_render: true,
+            texture_handle: None,
             drag_start: None,
             drag_bounds: None,
             export_path: String::from("fractal.png"),
@@ -78,14 +82,14 @@ impl FractalApp {
         let x_range = x_max - x_min;
         let y_range = y_max - y_min;
 
-        let scale_x = x_range / width as f32;
-        let scale_y = y_range / height as f32;
+        let scale_x = x_range / width as f64;
+        let scale_y = y_range / height as f64;
 
         // Use the larger scale so the view expands rather than crops
         let scale = scale_x.max(scale_y);
 
-        let new_x_range = scale * width as f32;
-        let new_y_range = scale * height as f32;
+        let new_x_range = scale * width as f64;
+        let new_y_range = scale * height as f64;
 
         self.params.bounds = [
             cx - new_x_range * 0.5,
@@ -109,8 +113,8 @@ impl FractalApp {
         let cx = (x_min + x_max) * 0.5;
         let cy = (y_min + y_max) * 0.5;
 
-        let x_range = (x_max - x_min) * new_w as f32 / self.last_display_w as f32;
-        let y_range = (y_max - y_min) * new_h as f32 / self.last_display_h as f32;
+        let x_range = (x_max - x_min) * new_w as f64 / self.last_display_w as f64;
+        let y_range = (y_max - y_min) * new_h as f64 / self.last_display_h as f64;
 
         self.params.bounds = [
             cx - x_range * 0.5,
@@ -154,13 +158,11 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
 }
 
 impl eframe::App for FractalApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── Ctrl+Q to quit ───────────────────────────────────────────────
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Q)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-
-        let render_state = frame.wgpu_render_state();
 
         // ── Side panel: controls ──────────────────────────────────────────
         egui::SidePanel::left("controls")
@@ -208,7 +210,7 @@ impl eframe::App for FractalApp {
                         ui.label("Max iterations:");
                         if ui
                             .add(
-                                egui::Slider::new(&mut self.params.max_iter, 10..=2000)
+                                egui::Slider::new(&mut self.params.max_iter, 10..=50000)
                                     .logarithmic(true),
                             )
                             .changed()
@@ -219,8 +221,8 @@ impl eframe::App for FractalApp {
                         ui.add_space(2.0);
                         ui.label("Supersampling:");
                         let ss_label = match self.params.supersampling {
-                            2 => "2x2 (4 samples)",
-                            3 => "3x3 (9 samples)",
+                            2 => "4x4 Sharp (16 samples)",
+                            3 => "6x6 Sharp (36 samples)",
                             _ => "Off",
                         };
                         let prev_ss = self.params.supersampling;
@@ -236,12 +238,12 @@ impl eframe::App for FractalApp {
                                 ui.selectable_value(
                                     &mut self.params.supersampling,
                                     2,
-                                    "2x2 (4 samples)",
+                                    "4x4 Sharp (16 samples)",
                                 );
                                 ui.selectable_value(
                                     &mut self.params.supersampling,
                                     3,
-                                    "3x3 (9 samples)",
+                                    "6x6 Sharp (36 samples)",
                                 );
                             });
                         if self.params.supersampling != prev_ss {
@@ -433,7 +435,7 @@ impl eframe::App for FractalApp {
                         );
                         ui.separator();
                         let [xn, xx, yn, yx] = self.params.bounds;
-                        let asp = ((xx - xn) / (yx - yn)) / (gpu.display_width as f32 / gpu.height as f32);
+                        let asp = ((xx - xn) / (yx - yn)) / (gpu.display_width as f64 / gpu.height as f64);
                         ui.monospace(
                             egui::RichText::new(format!(
                                 "asp={:.3}",
@@ -451,8 +453,9 @@ impl eframe::App for FractalApp {
             .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
                 let available = ui.available_size();
-                let display_w = (available.x as u32).max(64);
-                let display_h = (available.y as u32).max(64);
+                let ppp = ctx.pixels_per_point();
+                let display_w = ((available.x * ppp) as u32).max(64);
+                let display_h = ((available.y * ppp) as u32).max(64);
 
                 // Resize GPU buffers/texture if needed
                 let mut new_display_dims: Option<(u32, u32)> = None;
@@ -490,68 +493,60 @@ impl eframe::App for FractalApp {
                     self.needs_render = false;
                 }
 
-                // Register/update texture with egui-wgpu renderer
-                if let (Some(gpu), Some(rs)) = (&mut self.gpu, render_state) {
-                    let mut renderer = rs.renderer.write();
-                    let was_unregistered = gpu.texture_id.is_none();
-                    gpu.ensure_texture_registered(&mut renderer);
-                    if did_render || was_unregistered {
-                        gpu.update_texture(&mut renderer);
+                // CPU readback → egui::ColorImage texture upload
+                if did_render {
+                    if let Some(gpu) = &self.gpu {
+                        let pixels = gpu.read_pixels();
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [gpu.display_width as usize, gpu.height as usize],
+                            &pixels,
+                        );
+                        match &mut self.texture_handle {
+                            Some(h) => h.set(image, egui::TextureOptions::NEAREST),
+                            None => {
+                                self.texture_handle = Some(ctx.load_texture(
+                                    "fractal",
+                                    image,
+                                    egui::TextureOptions::NEAREST,
+                                ));
+                            }
+                        }
                     }
                 }
 
                 // Display image filling the panel
-                if let Some(gpu) = &self.gpu {
-                    if let Some(tex_id) = gpu.texture_id {
-                        let size = egui::vec2(available.x, available.y);
-                        let (response, _painter) =
-                            ui.allocate_painter(size, egui::Sense::click_and_drag());
-                        let rect = response.rect;
+                if let Some(handle) = &self.texture_handle {
+                    let size = egui::vec2(available.x, available.y);
+                    let (response, _painter) =
+                        ui.allocate_painter(size, egui::Sense::click_and_drag());
+                    let rect = response.rect;
 
-                        ui.painter().image(
-                            tex_id,
-                            rect,
-                            egui::Rect::from_min_max(
-                                egui::pos2(0.0, 0.0),
-                                egui::pos2(1.0, 1.0),
-                            ),
-                            egui::Color32::WHITE,
-                        );
+                    ui.painter().image(
+                        handle.id(),
+                        rect,
+                        egui::Rect::from_min_max(
+                            egui::pos2(0.0, 0.0),
+                            egui::pos2(1.0, 1.0),
+                        ),
+                        egui::Color32::WHITE,
+                    );
 
-                        // One-shot diagnostic: print all display dimensions
-                        if did_render && gpu.last_render_ms > 0.0 {
-                            static ONCE: std::sync::Once = std::sync::Once::new();
-                            ONCE.call_once(|| {
-                                eprintln!(
-                                    "DIAG: available=({:.1}, {:.1}) rect=({:.1}x{:.1}) display={}x{} stride={} tex={}x{}",
-                                    available.x, available.y,
-                                    rect.width(), rect.height(),
-                                    gpu.display_width, gpu.height,
-                                    gpu.width,
-                                    gpu.texture.size().width, gpu.texture.size().height,
-                                );
-                            });
-                        }
-
-                        // Update cursor complex coordinates for side panel display
-                        if let Some(pos) = response.hover_pos() {
-                            let frac_x =
-                                ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
-                            let frac_y =
-                                ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0);
-                            let [bx_min, bx_max, by_min, by_max] = self.params.bounds;
-                            let cx = bx_min as f64
-                                + frac_x as f64 * (bx_max - bx_min) as f64;
-                            let cy = by_min as f64
-                                + frac_y as f64 * (by_max - by_min) as f64;
-                            self.cursor_complex = Some((cx, cy));
-                        } else {
-                            self.cursor_complex = None;
-                        }
-
-                        // Mouse & keyboard interaction
-                        self.handle_input(ctx, &response, rect);
+                    // Update cursor complex coordinates for side panel display
+                    if let Some(pos) = response.hover_pos() {
+                        let frac_x =
+                            ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0) as f64;
+                        let frac_y =
+                            ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0) as f64;
+                        let [bx_min, bx_max, by_min, by_max] = self.params.bounds;
+                        let cx = bx_min + frac_x * (bx_max - bx_min);
+                        let cy = by_min + frac_y * (by_max - by_min);
+                        self.cursor_complex = Some((cx, cy));
+                    } else {
+                        self.cursor_complex = None;
                     }
+
+                    // Mouse & keyboard interaction
+                    self.handle_input(ctx, &response, rect);
                 }
             });
     }
@@ -571,12 +566,12 @@ impl FractalApp {
             let scroll = ctx.input(|i| i.raw_scroll_delta.y);
             if scroll != 0.0 {
                 if let Some(pos) = response.hover_pos() {
-                    let frac_x = (pos.x - rect.min.x) / rect.width();
-                    let frac_y = (pos.y - rect.min.y) / rect.height();
+                    let frac_x = ((pos.x - rect.min.x) / rect.width()) as f64;
+                    let frac_y = ((pos.y - rect.min.y) / rect.height()) as f64;
                     let cx = x_min + frac_x * (x_max - x_min);
                     let cy = y_min + frac_y * (y_max - y_min);
 
-                    let factor = if scroll > 0.0 { 0.85 } else { 1.0 / 0.85 };
+                    let factor: f64 = if scroll > 0.0 { 0.85 } else { 1.0 / 0.85 };
                     self.history.push(self.params.bounds);
                     self.params.bounds = [
                         cx - (cx - x_min) * factor,
@@ -597,10 +592,10 @@ impl FractalApp {
         if response.dragged() {
             if let (Some(start), Some(orig_bounds)) = (self.drag_start, self.drag_bounds) {
                 if let Some(current) = response.interact_pointer_pos() {
-                    let dx_px = current.x - start.x;
-                    let dy_px = current.y - start.y;
-                    let dx = -dx_px / rect.width() * (orig_bounds[1] - orig_bounds[0]);
-                    let dy = -dy_px / rect.height() * (orig_bounds[3] - orig_bounds[2]);
+                    let dx_px = (current.x - start.x) as f64;
+                    let dy_px = (current.y - start.y) as f64;
+                    let dx = -dx_px / rect.width() as f64 * (orig_bounds[1] - orig_bounds[0]);
+                    let dy = -dy_px / rect.height() as f64 * (orig_bounds[3] - orig_bounds[2]);
                     self.params.bounds = [
                         orig_bounds[0] + dx,
                         orig_bounds[1] + dx,
@@ -665,7 +660,7 @@ impl FractalApp {
             }
 
             // Arrow key panning (10% of view per press)
-            let pan_frac = 0.1;
+            let pan_frac: f64 = 0.1;
             let dx = (x_max - x_min) * pan_frac;
             let dy = (y_max - y_min) * pan_frac;
             if left || right || up || down {
@@ -694,7 +689,7 @@ impl FractalApp {
 
             // +/- keyboard zoom (centered)
             if plus || minus {
-                let factor = if plus { 0.85 } else { 1.0 / 0.85 };
+                let factor: f64 = if plus { 0.85 } else { 1.0 / 0.85 };
                 let cx = (x_min + x_max) * 0.5;
                 let cy = (y_min + y_max) * 0.5;
                 self.history.push(self.params.bounds);
