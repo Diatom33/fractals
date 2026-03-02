@@ -21,6 +21,10 @@ pub struct FractalApp {
 
     // Coordinate display
     cursor_complex: Option<(f64, f64)>,
+
+    // Last known display dimensions for aspect ratio correction
+    last_display_w: u32,
+    last_display_h: u32,
 }
 
 impl FractalApp {
@@ -53,14 +57,79 @@ impl FractalApp {
             export_msg: String::new(),
             export_msg_is_error: false,
             cursor_complex: None,
+            last_display_w: 0,
+            last_display_h: 0,
         }
     }
 
+    /// Adjust bounds so that the scale (units per pixel) is equal in x and y,
+    /// keeping the center of the view fixed. The larger scale wins so nothing
+    /// gets cropped — the smaller dimension is expanded to match.
+    /// Only for user-initiated changes (type switch, reset, undo) where we
+    /// need to establish a correct aspect ratio from scratch.
+    fn correct_aspect_ratio(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let [x_min, x_max, y_min, y_max] = self.params.bounds;
+        let cx = (x_min + x_max) * 0.5;
+        let cy = (y_min + y_max) * 0.5;
+
+        let x_range = x_max - x_min;
+        let y_range = y_max - y_min;
+
+        let scale_x = x_range / width as f32;
+        let scale_y = y_range / height as f32;
+
+        // Use the larger scale so the view expands rather than crops
+        let scale = scale_x.max(scale_y);
+
+        let new_x_range = scale * width as f32;
+        let new_y_range = scale * height as f32;
+
+        self.params.bounds = [
+            cx - new_x_range * 0.5,
+            cx + new_x_range * 0.5,
+            cy - new_y_range * 0.5,
+            cy + new_y_range * 0.5,
+        ];
+
+        self.last_display_w = width;
+        self.last_display_h = height;
+    }
+
+    /// Scale bounds proportionally when the display/GPU dimensions change.
+    /// Preserves center and per-pixel scale in each axis independently.
+    /// Unlike correct_aspect_ratio, this never uses max() so it can't ratchet.
+    fn scale_bounds_to_new_size(&mut self, new_w: u32, new_h: u32) {
+        if self.last_display_w == 0 || self.last_display_h == 0 || new_w == 0 || new_h == 0 {
+            return;
+        }
+        let [x_min, x_max, y_min, y_max] = self.params.bounds;
+        let cx = (x_min + x_max) * 0.5;
+        let cy = (y_min + y_max) * 0.5;
+
+        let x_range = (x_max - x_min) * new_w as f32 / self.last_display_w as f32;
+        let y_range = (y_max - y_min) * new_h as f32 / self.last_display_h as f32;
+
+        self.params.bounds = [
+            cx - x_range * 0.5,
+            cx + x_range * 0.5,
+            cy - y_range * 0.5,
+            cy + y_range * 0.5,
+        ];
+
+        self.last_display_w = new_w;
+        self.last_display_h = new_h;
+    }
+
     fn params_hash(&self) -> u64 {
-        let binding = self.params.to_gpu_params(
-            self.gpu.as_ref().map_or(960, |g| g.width),
-            self.gpu.as_ref().map_or(720, |g| g.height),
-        );
+        let (dw, h, stride, ss) = self.gpu.as_ref().map_or((960, 720, 960, 1), |g| {
+            (g.display_width, g.height, g.width, g.supersampling)
+        });
+        let binding = self.params.to_gpu_params(dw, h, stride);
+        // XOR in supersampling so SS changes trigger re-render
+        let ss_extra = (ss as u64) << 48;
         let bytes = bytemuck::bytes_of(&binding);
         let mut hash = 0u64;
         for chunk in bytes.chunks(8) {
@@ -68,7 +137,7 @@ impl FractalApp {
             arr[..chunk.len()].copy_from_slice(chunk);
             hash ^= u64::from_le_bytes(arr);
         }
-        hash
+        hash ^ ss_extra
     }
 }
 
@@ -86,6 +155,11 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
 
 impl eframe::App for FractalApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // ── Ctrl+Q to quit ───────────────────────────────────────────────
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Q)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         let render_state = frame.wgpu_render_state();
 
         // ── Side panel: controls ──────────────────────────────────────────
@@ -123,6 +197,7 @@ impl eframe::App for FractalApp {
                             });
                         if self.params.fractal_type != prev_type {
                             self.params.bounds = self.params.fractal_type.default_bounds();
+                            self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                             self.history.clear();
                             self.needs_render = true;
                         }
@@ -138,6 +213,38 @@ impl eframe::App for FractalApp {
                             )
                             .changed()
                         {
+                            self.needs_render = true;
+                        }
+
+                        ui.add_space(2.0);
+                        ui.label("Supersampling:");
+                        let ss_label = match self.params.supersampling {
+                            2 => "2x2 (4 samples)",
+                            3 => "3x3 (9 samples)",
+                            _ => "Off",
+                        };
+                        let prev_ss = self.params.supersampling;
+                        egui::ComboBox::from_id_salt("supersampling")
+                            .width(ui.available_width() - 8.0)
+                            .selected_text(ss_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.params.supersampling,
+                                    1,
+                                    "Off",
+                                );
+                                ui.selectable_value(
+                                    &mut self.params.supersampling,
+                                    2,
+                                    "2x2 (4 samples)",
+                                );
+                                ui.selectable_value(
+                                    &mut self.params.supersampling,
+                                    3,
+                                    "3x3 (9 samples)",
+                                );
+                            });
+                        if self.params.supersampling != prev_ss {
                             self.needs_render = true;
                         }
 
@@ -213,6 +320,7 @@ impl eframe::App for FractalApp {
                         ui.horizontal(|ui| {
                             if ui.button("Reset View").clicked() {
                                 self.params.bounds = self.params.fractal_type.default_bounds();
+                                self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                                 self.history.clear();
                                 self.needs_render = true;
                             }
@@ -223,6 +331,7 @@ impl eframe::App for FractalApp {
                             {
                                 if let Some(prev) = self.history.pop() {
                                     self.params.bounds = prev;
+                                    self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                                     self.needs_render = true;
                                 }
                             }
@@ -310,7 +419,10 @@ impl eframe::App for FractalApp {
                                 .color(egui::Color32::from_rgb(130, 170, 255)),
                         );
                         ui.separator();
-                        ui.monospace(format!("{}x{}", gpu.width, gpu.height));
+                        ui.monospace(format!("{}x{}", gpu.display_width, gpu.height));
+                        if gpu.supersampling > 1 {
+                            ui.monospace(format!("{}x SS", gpu.supersampling));
+                        }
                         ui.separator();
                         ui.monospace(format!("{:.1} ms", gpu.last_render_ms));
                         ui.separator();
@@ -318,6 +430,15 @@ impl eframe::App for FractalApp {
                         ui.separator();
                         ui.monospace(
                             egui::RichText::new(format!("{} iters", self.params.max_iter)).weak(),
+                        );
+                        ui.separator();
+                        let [xn, xx, yn, yx] = self.params.bounds;
+                        let asp = ((xx - xn) / (yx - yn)) / (gpu.display_width as f32 / gpu.height as f32);
+                        ui.monospace(
+                            egui::RichText::new(format!(
+                                "asp={:.3}",
+                                asp,
+                            )).weak(),
                         );
                     } else {
                         ui.monospace("GPU not initialized");
@@ -330,14 +451,31 @@ impl eframe::App for FractalApp {
             .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
                 let available = ui.available_size();
-                let img_w = (available.x as u32).max(64);
-                let img_h = (available.y as u32).max(64);
+                let display_w = (available.x as u32).max(64);
+                let display_h = (available.y as u32).max(64);
 
-                // Resize GPU texture if panel size changed
+                // Resize GPU buffers/texture if needed
+                let mut new_display_dims: Option<(u32, u32)> = None;
                 if let Some(gpu) = &mut self.gpu {
-                    if gpu.width != img_w || gpu.height != img_h {
-                        gpu.resize(img_w, img_h);
+                    let ss = self.params.supersampling;
+                    let size_changed = gpu.display_width != display_w || gpu.height != display_h;
+
+                    if size_changed || gpu.supersampling != ss {
+                        gpu.resize(display_w, display_h, ss);
                         self.needs_render = true;
+                    }
+                    if size_changed {
+                        new_display_dims = Some((gpu.display_width, gpu.height));
+                    }
+                }
+                if let Some((new_w, new_h)) = new_display_dims {
+                    if self.last_display_w > 0 {
+                        // Window resize: scale bounds proportionally to display dimensions.
+                        // No max() → no ratchet from sub-pixel display jitter.
+                        self.scale_bounds_to_new_size(new_w, new_h);
+                    } else {
+                        // First frame: establish correct aspect ratio from scratch
+                        self.correct_aspect_ratio(new_w, new_h);
                     }
                 }
 
@@ -379,6 +517,21 @@ impl eframe::App for FractalApp {
                             ),
                             egui::Color32::WHITE,
                         );
+
+                        // One-shot diagnostic: print all display dimensions
+                        if did_render && gpu.last_render_ms > 0.0 {
+                            static ONCE: std::sync::Once = std::sync::Once::new();
+                            ONCE.call_once(|| {
+                                eprintln!(
+                                    "DIAG: available=({:.1}, {:.1}) rect=({:.1}x{:.1}) display={}x{} stride={} tex={}x{}",
+                                    available.x, available.y,
+                                    rect.width(), rect.height(),
+                                    gpu.display_width, gpu.height,
+                                    gpu.width,
+                                    gpu.texture.size().width, gpu.texture.size().height,
+                                );
+                            });
+                        }
 
                         // Update cursor complex coordinates for side panel display
                         if let Some(pos) = response.hover_pos() {
@@ -470,6 +623,7 @@ impl FractalApp {
         // ── Double-click to reset ─────────────────────────────────────
         if response.double_clicked() {
             self.params.bounds = self.params.fractal_type.default_bounds();
+            self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
             self.history.clear();
             self.needs_render = true;
         }
@@ -498,12 +652,14 @@ impl FractalApp {
 
             if r_pressed {
                 self.params.bounds = self.params.fractal_type.default_bounds();
+                self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                 self.history.clear();
                 self.needs_render = true;
             }
             if backspace_pressed {
                 if let Some(prev) = self.history.pop() {
                     self.params.bounds = prev;
+                    self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                     self.needs_render = true;
                 }
             }

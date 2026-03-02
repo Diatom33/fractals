@@ -1,6 +1,7 @@
 // Colorization compute shader.
-// Reads iteration data + final z, produces RGBA output.
+// Reads iteration data + final z, produces weighted color into accumulation buffer.
 // Supports both escape-time and root-basin coloring.
+// Called once per sub-pixel sample; accumulates into a vec4<f32> buffer (rgb + weight).
 
 struct Params {
     bounds: vec4<f32>,
@@ -10,18 +11,22 @@ struct Params {
     julia_c: vec2<f32>,
     power: f32,
     relaxation: f32,
-    color_mode: u32,     // 0 = escape-time, 1 = root-basin
+    color_mode: u32,         // 0 = escape-time, 1 = root-basin
     num_roots: u32,
-    _pad: vec2<u32>,
+    sample_offset: vec2<f32>,
+    sample_weight: f32,
+    stride: u32,             // buffer row width in pixels (>= resolution.x)
+    _pad0: u32,
+    _pad1: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> iterations: array<f32>;
 @group(0) @binding(2) var<storage, read> final_z: array<vec2<f32>>;
-@group(0) @binding(3) var<storage, read_write> output: array<u32>;
+@group(0) @binding(3) var<storage, read_write> accum: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> roots: array<vec2<f32>>;
 
-// ── HSV to RGB ───────────────────────────────────────────────────────────────
+// -- HSV to RGB ---------------------------------------------------------------
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
     let h6 = h * 6.0;
@@ -41,21 +46,16 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
     }
 }
 
-// ── Color palettes ──────────────────────────────────────────────────────────
+// -- Color palettes -----------------------------------------------------------
 
 // Smooth escape-time coloring with a nice palette.
-// Uses absolute iteration count so colors stay stable when max_iter changes.
 fn escape_color(smooth_iter: f32, max_iter: f32) -> vec3<f32> {
     if smooth_iter >= max_iter {
         return vec3<f32>(0.0, 0.0, 0.0); // Set interior = black
     }
 
-    // Absolute color mapping: hue cycles based on log of iteration count,
-    // independent of max_iter. This keeps colors stable when changing iterations.
     let log_iter = log2(smooth_iter + 1.0);
     let hue = fract(log_iter * 0.15 + 0.6);
-
-    // Saturation and value based on log iteration — no max_iter dependency.
     let sat = 0.7 + 0.3 * cos(log_iter * 0.5);
     let val = 0.85 + 0.15 * cos(log_iter * 0.7);
 
@@ -93,43 +93,38 @@ fn basin_color(smooth_iter: f32, z: vec2<f32>, max_iter: f32, n_roots: u32) -> v
     return hsv_to_rgb(hue, sat, shade);
 }
 
-// ── Pack RGBA ────────────────────────────────────────────────────────────────
+// -- Colorize a single sample -------------------------------------------------
 
-fn pack_rgba(rgb: vec3<f32>) -> u32 {
-    let r = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-    let g = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-    let b = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-    return r | (g << 8u) | (b << 16u) | (255u << 24u);
+fn colorize_sample(smooth_iter: f32, z: vec2<f32>, max_iter: f32) -> vec3<f32> {
+    if params.color_mode == 0u {
+        return escape_color(smooth_iter, max_iter);
+    } else {
+        return basin_color(smooth_iter, z, max_iter, params.num_roots);
+    }
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+// -- Main ---------------------------------------------------------------------
+// Dispatch covers the OUTPUT resolution (width, height).
+// Each invocation colorizes one sample and accumulates (adds) the weighted
+// color into the accum buffer. The finalize shader divides by total weight.
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
     let w = params.resolution.x;
     let h = params.resolution.y;
+    let x = gid.x;
+    let y = gid.y;
     if x >= w || y >= h { return; }
 
-    let idx = y * w + x;
+    let idx = y * params.stride + x;
+    let max_iter = f32(params.max_iter);
     let smooth_iter = iterations[idx];
     let z = final_z[idx];
-    let max_iter = f32(params.max_iter);
+    let color = colorize_sample(smooth_iter, z, max_iter);
 
-    var color: vec3<f32>;
-
-    if params.color_mode == 0u {
-        color = escape_color(smooth_iter, max_iter);
-    } else {
-        color = basin_color(smooth_iter, z, max_iter, params.num_roots);
-    }
-
-    // The output buffer is raw-copied into an Rgba8UnormSrgb texture.
-    // copy_buffer_to_texture does NOT apply color conversion — bytes are
-    // stored verbatim. The sRGB decode happens when egui samples the
-    // texture. Our HSV palette produces sRGB-like perceptual values, so
-    // we store them directly — the sRGB decode on sampling is close enough
-    // to identity for visually-authored palettes.
-    output[idx] = pack_rgba(color);
+    // Accumulate: add weighted color to accumulation buffer
+    // accum.xyz = sum of weighted RGB, accum.w = sum of weights
+    let prev = accum[idx];
+    let wt = params.sample_weight;
+    accum[idx] = prev + vec4<f32>(color * wt, wt);
 }

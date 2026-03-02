@@ -139,6 +139,7 @@ pub struct FractalParams {
     pub power: f32,           // Multibrot exponent
     pub relaxation: f32,      // Nova relaxation parameter a
     pub poly_degree: u32,     // Newton/Nova polynomial degree n (for z^n - 1)
+    pub supersampling: u32,   // 1 = off, 2 = 2x2, 3 = 3x3
 }
 
 impl Default for FractalParams {
@@ -151,6 +152,7 @@ impl Default for FractalParams {
             power: 2.0,
             relaxation: 1.0,
             poly_degree: 3,
+            supersampling: 1,
         }
     }
 }
@@ -169,10 +171,13 @@ impl FractalParams {
     }
 
     /// Build the GPU uniform data (must match Params struct in WGSL).
-    pub fn to_gpu_params(&self, width: u32, height: u32) -> GpuParams {
+    /// `display_w` and `display_h` are the visible display resolution.
+    /// `stride` is the buffer row width in pixels (>= display_w, aligned for wgpu).
+    /// Sub-pixel offsets for multi-pass supersampling are set separately.
+    pub fn to_gpu_params(&self, display_w: u32, display_h: u32, stride: u32) -> GpuParams {
         GpuParams {
             bounds: self.bounds,
-            resolution: [width, height],
+            resolution: [display_w, display_h],
             max_iter: self.max_iter,
             fractal_type: self.fractal_type.shader_index(),
             julia_c: self.julia_c,
@@ -184,23 +189,81 @@ impl FractalParams {
             } else {
                 0
             },
+            sample_offset: [0.0, 0.0],
+            sample_weight: 1.0,
+            stride,
             _pad: [0; 2],
         }
     }
 }
 
+/// Mitchell-Netravali 1D filter (B=1/3, C=1/3).
+/// Maps pixel distance to filter weight; supports negative lobes for sharpening.
+pub fn mitchell_1d(x: f32) -> f32 {
+    let b: f32 = 1.0 / 3.0;
+    let c: f32 = 1.0 / 3.0;
+    let ax = x.abs();
+    if ax < 1.0 {
+        ((12.0 - 9.0 * b - 6.0 * c) * ax * ax * ax
+            + (-18.0 + 12.0 * b + 6.0 * c) * ax * ax
+            + (6.0 - 2.0 * b))
+            / 6.0
+    } else if ax < 2.0 {
+        ((-b - 6.0 * c) * ax * ax * ax
+            + (6.0 * b + 30.0 * c) * ax * ax
+            + (-12.0 * b - 48.0 * c) * ax
+            + (8.0 * b + 24.0 * c))
+            / 6.0
+    } else {
+        0.0
+    }
+}
+
+/// Pre-compute sub-pixel sample positions and Mitchell-Netravali weights.
+/// Returns (offset_x, offset_y, weight) tuples in pixel units.
+/// Grid spans [-0.5, +0.5] pixels (endpoint-inclusive); filter radius = 0.75.
+pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
+    let radius: f32 = 0.75;
+    let mut samples = Vec::with_capacity((ss * ss) as usize);
+    for sy in 0..ss {
+        for sx in 0..ss {
+            // Endpoint-inclusive grid: ss=1 → 0.0, ss=2 → ±0.5, ss=3 → -0.5, 0.0, +0.5
+            let offset_x = if ss == 1 {
+                0.0
+            } else {
+                -0.5 + (sx as f32) / (ss as f32 - 1.0)
+            };
+            let offset_y = if ss == 1 {
+                0.0
+            } else {
+                -0.5 + (sy as f32) / (ss as f32 - 1.0)
+            };
+            // Separable 2D filter: w(x,y) = w(x) * w(y), scaled to filter radius
+            let wx = mitchell_1d(offset_x / radius * 2.0);
+            let wy = mitchell_1d(offset_y / radius * 2.0);
+            let w = wx * wy;
+            samples.push((offset_x, offset_y, w));
+        }
+    }
+    samples
+}
+
 /// GPU-side uniform struct. Must match WGSL layout exactly.
+/// Total 80 bytes, aligned to 16 (vec4<f32> max alignment).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuParams {
-    pub bounds: [f32; 4],       // 16 bytes
-    pub resolution: [u32; 2],   // 8 bytes
-    pub max_iter: u32,          // 4 bytes
-    pub fractal_type: u32,      // 4 bytes  (offset 24)
-    pub julia_c: [f32; 2],      // 8 bytes  (offset 32)
-    pub power: f32,             // 4 bytes  (offset 40)
-    pub relaxation: f32,        // 4 bytes  (offset 44)
-    pub color_mode: u32,        // 4 bytes  (offset 48)
-    pub num_roots: u32,         // 4 bytes  (offset 52)
-    pub _pad: [u32; 2],         // 8 bytes  (offset 56) → total 64 bytes
+    pub bounds: [f32; 4],           // 16 bytes (offset 0)
+    pub resolution: [u32; 2],       // 8 bytes  (offset 16) — OUTPUT resolution
+    pub max_iter: u32,              // 4 bytes  (offset 24)
+    pub fractal_type: u32,          // 4 bytes  (offset 28)
+    pub julia_c: [f32; 2],          // 8 bytes  (offset 32)
+    pub power: f32,                 // 4 bytes  (offset 40)
+    pub relaxation: f32,            // 4 bytes  (offset 44)
+    pub color_mode: u32,            // 4 bytes  (offset 48)
+    pub num_roots: u32,             // 4 bytes  (offset 52)
+    pub sample_offset: [f32; 2],    // 8 bytes  (offset 56) — sub-pixel offset in pixel units
+    pub sample_weight: f32,         // 4 bytes  (offset 64)
+    pub stride: u32,                // 4 bytes  (offset 68) — buffer row stride in pixels (≥ resolution.x)
+    pub _pad: [u32; 2],             // 8 bytes  (offset 72) → total 80 bytes
 }

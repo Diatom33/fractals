@@ -7,7 +7,7 @@
 - **GUI**: egui 0.31 via eframe (wgpu backend, x11 + wayland features)
 - **Build**: `cargo run --release` (always use release — debug is unusably slow for GPU)
 - **Export CLI**: `cargo run --release -- --export file.png --type mandelbrot`
-
+- **Keyboard**: Ctrl+Q to close, R/Backspace to reset view, scroll to zoom, double-click to center
 
 ## File Map
 
@@ -20,6 +20,7 @@
 | `src/shaders/escape.wgsl` | shader | Mandelbrot, Julia, Burning Ship, Multibrot iteration |
 | `src/shaders/newton.wgsl` | shader | Newton, Nova Julia, Nova Mandelbrot iteration |
 | `src/shaders/colorize.wgsl` | shader | HSV coloring: escape-time smooth + root-basin modes |
+| `src/shaders/finalize.wgsl` | shader | Divides accumulated samples by weight, packs to RGBA |
 
 
 ## Critical Gotchas
@@ -37,7 +38,7 @@ wgpu's `copy_buffer_to_texture` requires `bytes_per_row` to be a multiple of 256
 `vec2<f32> * vec2<f32>` is component-wise multiplication, NOT scalar broadcast. To multiply a complex number by a scalar, use `scalar * vec` (f32 * vec2), not `vec2(scalar, 0.0) * vec`. The latter zeros the imaginary part.
 
 ### GpuParams Struct Alignment
-`GpuParams` in `fractals.rs` must match the WGSL `Params` struct exactly — same field order, same sizes, padded to 64 bytes. It's `#[repr(C)]` with `bytemuck::Pod + Zeroable`. If you add a field, add it in both places and update `_pad`.
+`GpuParams` in `fractals.rs` must match the WGSL `Params` struct exactly — same field order, same sizes, padded to 80 bytes. It's `#[repr(C)]` with `bytemuck::Pod + Zeroable`. If you add a field, add it in both places and adjust `_pad`. The Params struct must be updated in ALL FOUR `.wgsl` files (escape, newton, colorize, finalize).
 
 ### Texture Registration
 The egui texture must be registered once via `renderer.register_native_texture()` and updated via `renderer.update_egui_texture_from_wgpu_texture()` after each render. The `texture_id` is `None` until first registration and must be re-registered after resize (since the texture is recreated).
@@ -49,20 +50,33 @@ User input → FractalParams changed → dirty flag set
                                           ↓
                               GpuState::render()
                                     ↓
-                        [write params uniform buffer]
                         [write roots buffer if Newton/Nova]
+                        [clear accumulation buffer]
                                     ↓
-                        Pass 1: escape.wgsl OR newton.wgsl
-                            → iterations buffer (f32/pixel)
-                            → final_z buffer (vec2<f32>/pixel)
+                    ┌─── for each sub-pixel sample (ss×ss) ───┐
+                    │                                          │
+                    │  [write params with sample_offset]       │
+                    │                                          │
+                    │  Pass 1: escape.wgsl OR newton.wgsl      │
+                    │      → iterations buffer (f32/pixel)     │
+                    │      → final_z buffer (vec2<f32>/pixel)  │
+                    │                                          │
+                    │  Pass 2: colorize.wgsl                   │
+                    │      → accumulate weighted color into    │
+                    │        accum buffer (vec4<f32>/pixel)    │
+                    └──────────────────────────────────────────┘
                                     ↓
-                        Pass 2: colorize.wgsl
-                            → output buffer (u32 packed RGBA/pixel)
+                        Pass 3: finalize.wgsl
+                            → divide by total weight, pack RGBA
+                            → output buffer (u32/pixel)
                                     ↓
                         copy_buffer_to_texture → display texture
                                     ↓
                         egui paints texture to central panel
 ```
+
+### Supersampling Architecture
+Multi-pass accumulation: each sub-pixel sample is a full render pass with a sub-pixel offset applied in complex plane coordinate mapping. All buffers stay at output resolution (no Nx inflation), avoiding the 128MB `max_storage_buffer_binding_size` limit. The colorize shader accumulates weighted RGB into a vec4<f32> buffer; the finalize shader divides by total weight and packs to RGBA.
 
 ## Adding a New Fractal Type
 
@@ -78,7 +92,7 @@ User input → FractalParams changed → dirty flag set
 
 1. Add field to `FractalParams` in `fractals.rs`
 2. Add field to `GpuParams` (must maintain alignment — adjust `_pad`)
-3. Add matching field to `Params` struct in ALL three `.wgsl` files
+3. Add matching field to `Params` struct in ALL four `.wgsl` files (escape, newton, colorize, finalize)
 4. Add UI control in `app.rs` (gated by `visible_controls()`)
 5. Wire it through `to_gpu_params()` in `fractals.rs`
 

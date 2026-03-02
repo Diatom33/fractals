@@ -2,8 +2,8 @@
 // Handles: Mandelbrot (0), Julia (1), Burning Ship (2), Multibrot (3)
 
 struct Params {
-    bounds: vec4<f32>,       // x_min, x_max, y_min, y_max
-    resolution: vec2<u32>,   // width, height
+    bounds: vec4<f32>,           // x_min, x_max, y_min, y_max
+    resolution: vec2<u32>,       // output width, height
     max_iter: u32,
     fractal_type: u32,
     julia_c: vec2<f32>,
@@ -11,7 +11,11 @@ struct Params {
     relaxation: f32,
     color_mode: u32,
     num_roots: u32,
-    _pad: vec2<u32>,
+    sample_offset: vec2<f32>,    // sub-pixel offset in pixel units
+    sample_weight: f32,
+    stride: u32,             // buffer row width in pixels (>= resolution.x)
+    _pad0: u32,
+    _pad1: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -68,11 +72,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = params.resolution.y;
     if x >= w || y >= h { return; }
 
-    let idx = y * w + x;
+    let idx = y * params.stride + x;
 
-    // Map pixel to complex plane
-    let fx = f32(x) / f32(w - 1u);
-    let fy = f32(y) / f32(h - 1u);
+    // Map pixel to complex plane with sub-pixel offset for supersampling
+    let fx = (f32(x) + params.sample_offset.x) / f32(w - 1u);
+    let fy = (f32(y) + params.sample_offset.y) / f32(h - 1u);
     let pixel = vec2<f32>(
         params.bounds.x + fx * (params.bounds.y - params.bounds.x),
         params.bounds.z + fy * (params.bounds.w - params.bounds.z),

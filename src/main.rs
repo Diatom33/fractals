@@ -33,7 +33,7 @@ fn main() -> eframe::Result {
 }
 
 fn export_cli(args: &[String], path: &str) -> eframe::Result {
-    use fractals::{FractalParams, FractalType};
+    use fractals::{FractalParams, FractalType, GpuParams};
 
     let mut params = FractalParams::default();
 
@@ -48,6 +48,34 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                     params.bounds = ft.default_bounds();
                     break;
                 }
+            }
+        }
+    }
+
+    // Parse --degree (for Newton/Nova)
+    if let Some(pos) = args.iter().position(|a| a == "--degree") {
+        if let Some(val) = args.get(pos + 1) {
+            if let Ok(d) = val.parse::<u32>() {
+                params.poly_degree = d.clamp(2, 8);
+            }
+        }
+    }
+
+    // Parse --supersample (1, 2, or 3)
+    if let Some(pos) = args.iter().position(|a| a == "--supersample") {
+        if let Some(val) = args.get(pos + 1) {
+            if let Ok(ss) = val.parse::<u32>() {
+                params.supersampling = ss.clamp(1, 3);
+            }
+        }
+    }
+
+    // Parse --bounds x_min,x_max,y_min,y_max
+    if let Some(pos) = args.iter().position(|a| a == "--bounds") {
+        if let Some(val) = args.get(pos + 1) {
+            let parts: Vec<f32> = val.split(',').filter_map(|s| s.parse().ok()).collect();
+            if parts.len() == 4 {
+                params.bounds = [parts[0], parts[1], parts[2], parts[3]];
             }
         }
     }
@@ -71,10 +99,14 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
 
     println!("Exporting {} to {} ...", params.fractal_type.name(), path);
 
-    // Build a minimal GpuState-like pipeline inline
+    // Build a minimal pipeline inline for headless rendering
     let width = 1920u32;
     let height = 1080u32;
-    let gpu_params = params.to_gpu_params(width, height);
+    let ss = params.supersampling;
+    // Align width to 64-pixel boundary (wgpu row alignment requirement)
+    let align = |w: u32| -> u32 { (w + 63) / 64 * 64 };
+    let width = align(width);
+    let out_pixels = (width * height) as u64;
 
     let escape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
@@ -88,30 +120,38 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         label: None,
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/colorize.wgsl").into()),
     });
-
-    let num_pixels = (width * height) as u64;
+    let finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/finalize.wgsl").into()),
+    });
 
     let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: std::mem::size_of_val(&gpu_params) as u64,
+        size: std::mem::size_of::<GpuParams>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let iter_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: num_pixels * 4,
+        size: out_pixels * 4, // f32 per pixel
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
     let z_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: num_pixels * 8,
+        size: out_pixels * 8, // vec2<f32> per pixel
         usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let accum_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: out_pixels * 16, // vec4<f32> per pixel
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let out_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: num_pixels * 4,
+        size: out_pixels * 4, // u32 per output pixel
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -123,12 +163,10 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     });
     let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: num_pixels * 4,
+        size: out_pixels * 4,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-
-    queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&gpu_params));
 
     if params.fractal_type.needs_roots() {
         let roots = params.compute_roots();
@@ -137,7 +175,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         queue.write_buffer(&roots_buf, 0, bytemuck::cast_slice(&flat));
     }
 
-    // Build bind groups + pipelines
+    // Build bind group layouts + pipelines
     let bgl_uniform = |b: u32| wgpu::BindGroupLayoutEntry {
         binding: b,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -206,7 +244,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &roots_buf)],
     });
 
-    // Colorize pipeline
+    // Colorize pipeline (now writes to accum buffer instead of output)
     let col_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
         entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, true), bgl_storage(3, false), bgl_storage(4, true)],
@@ -224,37 +262,96 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let col_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &col_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &out_buf), be!(4, &roots_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &accum_buf), be!(4, &roots_buf)],
+    });
+
+    // Finalize pipeline
+    let fin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false)],
+    });
+    let fin_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&fin_layout], push_constant_ranges: &[],
+        })),
+        module: &finalize_shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let fin_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &fin_layout,
+        entries: &[be!(0, &params_buf), be!(1, &accum_buf), be!(2, &out_buf)],
     });
 
     let wg_x = (width + 15) / 16;
     let wg_y = (height + 15) / 16;
 
-    let mut encoder = device.create_command_encoder(&Default::default());
+    // Mitchell-Netravali reconstruction filter (B=1/3, C=1/3):
+    // negative lobes sharpen edges instead of blurring like Gaussian.
+    let samples = fractals::compute_samples(ss);
 
-    // Compute
+    // Clear accumulation buffer
     {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        if params.fractal_type.is_escape_time() {
-            pass.set_pipeline(&esc_pipe);
-            pass.set_bind_group(0, &esc_bg, &[]);
-        } else {
-            pass.set_pipeline(&new_pipe);
-            pass.set_bind_group(0, &new_bg, &[]);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.clear_buffer(&accum_buf, 0, None);
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    // Multi-pass: iterate and accumulate for each sub-pixel sample
+    for &(offset_x, offset_y, weight) in &samples {
+        let mut gpu_params = params.to_gpu_params(width, height, width);
+        gpu_params.sample_offset = [offset_x, offset_y];
+        gpu_params.sample_weight = weight;
+
+        queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&gpu_params));
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+
+        // Fractal iteration
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            if params.fractal_type.is_escape_time() {
+                pass.set_pipeline(&esc_pipe);
+                pass.set_bind_group(0, &esc_bg, &[]);
+            } else {
+                pass.set_pipeline(&new_pipe);
+                pass.set_bind_group(0, &new_bg, &[]);
+            }
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
-        pass.dispatch_workgroups(wg_x, wg_y, 1);
-    }
-    // Colorize
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&col_pipe);
-        pass.set_bind_group(0, &col_bg, &[]);
-        pass.dispatch_workgroups(wg_x, wg_y, 1);
-    }
-    // Copy to readback
-    encoder.copy_buffer_to_buffer(&out_buf, 0, &readback_buf, 0, num_pixels * 4);
 
-    queue.submit(std::iter::once(encoder.finish()));
+        // Colorize and accumulate
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&col_pipe);
+            pass.set_bind_group(0, &col_bg, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    // Finalize: divide by weight, pack to RGBA, copy to readback
+    {
+        let gpu_params = params.to_gpu_params(width, height, width);
+        queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&gpu_params));
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&fin_pipe);
+            pass.set_bind_group(0, &fin_bg, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(&out_buf, 0, &readback_buf, 0, out_pixels * 4);
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
     device.poll(wgpu::Maintain::Wait);
 
     let slice = readback_buf.slice(..);
@@ -266,7 +363,8 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let data = slice.get_mapped_range();
     let img = image::RgbaImage::from_raw(width, height, data.to_vec()).unwrap();
     img.save(path).unwrap();
-    println!("Done: {}x{} → {}", width, height, path);
+    let ss_info = if ss > 1 { format!(" ({}x{} SS, {} passes)", ss, ss, ss * ss) } else { String::new() };
+    println!("Done: {}x{}{} -> {}", width, height, ss_info, path);
 
     Ok(())
 }
