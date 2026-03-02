@@ -243,6 +243,78 @@ pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
     samples
 }
 
+/// Perturbation-specific GPU uniform. Must match PerturbParams in escape_perturb.wgsl.
+/// Kept separate from GpuParams to avoid changing all 4 shader files.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PerturbGpuParams {
+    pub ref_orbit_len: u32,
+    pub _pad: [u32; 3],
+}
+
+/// Data for perturbation rendering: reference orbit + metadata.
+pub struct PerturbData {
+    /// Reference orbit Z_n values as f32 pairs, len = orbit_len.
+    pub orbit: Vec<[f32; 2]>,
+    /// How many iterations before reference escaped (or max_iter).
+    pub orbit_len: u32,
+}
+
+/// Compute a reference orbit at arbitrary precision using rug (GMP/MPFR).
+/// center_re, center_im are f64 view center; precision_bits scales with zoom depth.
+pub fn compute_reference_orbit(
+    center_re: f64,
+    center_im: f64,
+    max_iter: u32,
+    pixel_step: f64,
+) -> PerturbData {
+    use rug::Float;
+
+    // Precision: ~3.32 bits per decimal digit of zoom depth, plus safety margin
+    let zoom_digits = if pixel_step > 0.0 {
+        (-pixel_step.log10()).max(16.0) as u32
+    } else {
+        64
+    };
+    let precision = (zoom_digits * 4 + 64).max(128);
+
+    let c_re = Float::with_val(precision, center_re);
+    let c_im = Float::with_val(precision, center_im);
+    let mut z_re = Float::with_val(precision, 0.0);
+    let mut z_im = Float::with_val(precision, 0.0);
+
+    let mut orbit = Vec::with_capacity(max_iter as usize + 1);
+    let escape_r2 = 256.0_f64;
+
+    for _ in 0..max_iter {
+        // Store Z_n as f32 for GPU
+        let zr_f32 = z_re.to_f32();
+        let zi_f32 = z_im.to_f32();
+        orbit.push([zr_f32, zi_f32]);
+
+        // z = z^2 + c at arbitrary precision
+        let zr2 = Float::with_val(precision, &z_re * &z_re);
+        let zi2 = Float::with_val(precision, &z_im * &z_im);
+        let zri = Float::with_val(precision, &z_re * &z_im);
+
+        z_re = Float::with_val(precision, &zr2 - &zi2) + &c_re;
+        z_im = Float::with_val(precision, &zri * 2u32) + &c_im;
+
+        // Escape check
+        let mag2: f64 = (Float::with_val(precision, &z_re * &z_re)
+            + Float::with_val(precision, &z_im * &z_im))
+        .to_f64();
+        if mag2 > escape_r2 {
+            // Store the escaping Z value too (needed for smooth coloring)
+            orbit.push([z_re.to_f32(), z_im.to_f32()]);
+            break;
+        }
+    }
+
+    let orbit_len = orbit.len() as u32;
+    PerturbData { orbit, orbit_len }
+}
+
 /// GPU-side uniform struct. Must match WGSL layout exactly.
 /// Total 80 bytes. Uses center + pixel_step instead of raw bounds
 /// to enable double-single (emulated f64) precision in shaders.

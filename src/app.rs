@@ -434,14 +434,18 @@ impl eframe::App for FractalApp {
                             egui::RichText::new(format!("{} iters", self.params.max_iter)).weak(),
                         );
                         ui.separator();
-                        let [xn, xx, yn, yx] = self.params.bounds;
-                        let asp = ((xx - xn) / (yx - yn)) / (gpu.display_width as f64 / gpu.height as f64);
+                        let [xn, xx, _yn, _yx] = self.params.bounds;
+                        let pixel_step = (xx - xn) / gpu.display_width as f64;
+                        let zoom_exp = -(pixel_step.log10().floor() as i32);
                         ui.monospace(
-                            egui::RichText::new(format!(
-                                "asp={:.3}",
-                                asp,
-                            )).weak(),
+                            egui::RichText::new(format!("1e-{}", zoom_exp)).weak(),
                         );
+                        if gpu.using_perturbation {
+                            ui.monospace(
+                                egui::RichText::new("PERTURB")
+                                    .color(egui::Color32::from_rgb(255, 200, 100)),
+                            );
+                        }
                     } else {
                         ui.monospace("GPU not initialized");
                     }
