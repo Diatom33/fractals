@@ -208,64 +208,36 @@ impl FractalParams {
     }
 }
 
-/// Mitchell-Netravali 1D filter (B=1/3, C=1/3).
-/// Maps pixel distance to filter weight; supports negative lobes for sharpening.
-pub fn mitchell_1d(x: f32) -> f32 {
-    let b: f32 = 1.0 / 3.0;
-    let c: f32 = 1.0 / 3.0;
-    let ax = x.abs();
-    if ax < 1.0 {
-        ((12.0 - 9.0 * b - 6.0 * c) * ax * ax * ax
-            + (-18.0 + 12.0 * b + 6.0 * c) * ax * ax
-            + (6.0 - 2.0 * b))
-            / 6.0
-    } else if ax < 2.0 {
-        ((-b - 6.0 * c) * ax * ax * ax
-            + (6.0 * b + 30.0 * c) * ax * ax
-            + (-12.0 * b - 48.0 * c) * ax
-            + (8.0 * b + 24.0 * c))
-            / 6.0
-    } else {
-        0.0
-    }
-}
-
-/// Pre-compute sub-pixel sample positions and Mitchell-Netravali weights.
+/// Pre-compute sub-pixel sample positions and weights for anti-aliasing.
 /// Returns (offset_x, offset_y, weight) tuples in pixel units.
 ///
-/// The Mitchell filter (B=C=1/3) has support [-2, 2] with negative lobes
-/// in [1, 2] that provide sharpening. To activate these lobes, the grid
-/// must extend beyond ±1 pixel from center.
+/// Uses a uniform grid within the pixel footprint [-0.5, +0.5] with equal
+/// weights (box filter SSAA). Fractals have infinite bandwidth so
+/// reconstruction filters like Mitchell just add blur — simple averaging
+/// of sub-pixel samples gives clean AA without softening.
 ///
 /// Quality levels:
 ///   ss=1: Off (1 sample at center)
-///   ss=2: 4x4 grid [-1.5, +1.5] — 16 samples, sharp Mitchell with negative lobes
-///   ss=3: 6x6 grid [-2.0, +2.0] — 36 samples, full Mitchell support
+///   ss=2: 4x4 grid within pixel — 16 samples
+///   ss=3: 8x8 grid within pixel — 64 samples
 pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
     if ss <= 1 {
-        // Single sample at center
         return vec![(0.0, 0.0, 1.0)];
     }
 
-    // Grid size and extent based on quality level
-    let (grid_n, extent): (u32, f32) = match ss {
-        2 => (4, 1.5), // 4x4 over [-1.5, 1.5] — activates negative lobes
-        _ => (6, 2.0), // 6x6 over [-2.0, 2.0] — full Mitchell support
+    // Grid density within [-0.5, +0.5] pixel footprint
+    let grid_n: u32 = match ss {
+        2 => 4,  // 4x4 = 16 samples
+        _ => 8,  // 8x8 = 64 samples
     };
 
     let mut samples = Vec::with_capacity((grid_n * grid_n) as usize);
     for sy in 0..grid_n {
         for sx in 0..grid_n {
-            let offset_x = -extent + (sx as f32) * (2.0 * extent) / (grid_n as f32 - 1.0);
-            let offset_y = -extent + (sy as f32) * (2.0 * extent) / (grid_n as f32 - 1.0);
-            // Separable 2D filter: w(x,y) = w(x) * w(y)
-            let wx = mitchell_1d(offset_x);
-            let wy = mitchell_1d(offset_y);
-            let w = wx * wy;
-            // Skip samples with negligible weight (outside support)
-            if w.abs() > 1e-6 {
-                samples.push((offset_x, offset_y, w));
-            }
+            // Stratified grid: center of each sub-pixel cell
+            let offset_x = -0.5 + (sx as f32 + 0.5) / grid_n as f32;
+            let offset_y = -0.5 + (sy as f32 + 0.5) / grid_n as f32;
+            samples.push((offset_x, offset_y, 1.0));
         }
     }
     samples

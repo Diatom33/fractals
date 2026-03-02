@@ -363,7 +363,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let data = slice.get_mapped_range();
     let img = image::RgbaImage::from_raw(width, height, data.to_vec()).unwrap();
     img.save(path).unwrap();
-    let ss_info = if ss > 1 { format!(" ({} passes, Mitchell sharp)", samples.len()) } else { String::new() };
+    let ss_info = if ss > 1 { format!(" ({} samples)", samples.len()) } else { String::new() };
     println!("Done: {}x{}{} -> {}", width, height, ss_info, path);
 
     Ok(())

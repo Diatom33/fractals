@@ -221,8 +221,8 @@ impl eframe::App for FractalApp {
                         ui.add_space(2.0);
                         ui.label("Supersampling:");
                         let ss_label = match self.params.supersampling {
-                            2 => "4x4 Sharp (16 samples)",
-                            3 => "6x6 Sharp (36 samples)",
+                            2 => "4x4 (16 samples)",
+                            3 => "8x8 (64 samples)",
                             _ => "Off",
                         };
                         let prev_ss = self.params.supersampling;
@@ -238,12 +238,12 @@ impl eframe::App for FractalApp {
                                 ui.selectable_value(
                                     &mut self.params.supersampling,
                                     2,
-                                    "4x4 Sharp (16 samples)",
+                                    "4x4 (16 samples)",
                                 );
                                 ui.selectable_value(
                                     &mut self.params.supersampling,
                                     3,
-                                    "6x6 Sharp (36 samples)",
+                                    "8x8 (64 samples)",
                                 );
                             });
                         if self.params.supersampling != prev_ss {
