@@ -33,7 +33,7 @@ fn main() -> eframe::Result {
 }
 
 fn export_cli(args: &[String], path: &str) -> eframe::Result {
-    use fractals::{FractalParams, FractalType, GpuParams};
+    use fractals::{FractalParams, FractalType, GpuParams, PerturbGpuParams};
 
     let mut params = FractalParams::default();
 
@@ -66,6 +66,15 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         if let Some(val) = args.get(pos + 1) {
             if let Ok(ss) = val.parse::<u32>() {
                 params.supersampling = ss.clamp(1, 3);
+            }
+        }
+    }
+
+    // Parse --iter
+    if let Some(pos) = args.iter().position(|a| a == "--iter") {
+        if let Some(val) = args.get(pos + 1) {
+            if let Ok(i) = val.parse::<u32>() {
+                params.max_iter = i.clamp(10, 50000);
             }
         }
     }
@@ -168,6 +177,37 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         mapped_at_creation: false,
     });
 
+    // Perturbation resources
+    let pixel_step = (params.bounds[1] - params.bounds[0]) / (width as f64 - 1.0).max(1.0);
+    let use_perturb = params.fractal_type == FractalType::Mandelbrot && pixel_step < 1e-7;
+
+    let perturb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/escape_perturb.wgsl").into()),
+    });
+    let ref_orbit_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (params.max_iter as u64 + 1) * 8,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let perturb_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: std::mem::size_of::<PerturbGpuParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    if use_perturb {
+        let cx = (params.bounds[0] + params.bounds[1]) / 2.0;
+        let cy = (params.bounds[2] + params.bounds[3]) / 2.0;
+        let perturb_data = fractals::compute_reference_orbit(cx, cy, params.max_iter, pixel_step);
+        queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
+        let pgpu = PerturbGpuParams { ref_orbit_len: perturb_data.orbit_len, _pad: [0; 3] };
+        queue.write_buffer(&perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));
+        println!("  Perturbation mode: ref orbit {} iters, precision for 1e-{:.0}", perturb_data.orbit_len, -pixel_step.log10());
+    }
+
     if params.fractal_type.needs_roots() {
         let roots = params.compute_roots();
         let mut flat: Vec<f32> = roots.iter().flat_map(|r| r.iter().copied()).collect();
@@ -221,6 +261,27 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         label: None,
         layout: &esc_layout,
         entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf)],
+    });
+
+    // Perturbation pipeline
+    let perturb_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_uniform(4)],
+    });
+    let perturb_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&perturb_layout], push_constant_ranges: &[],
+        })),
+        module: &perturb_shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let perturb_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &perturb_layout,
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &ref_orbit_buf), be!(4, &perturb_params_buf)],
     });
 
     // Newton pipeline
@@ -313,7 +374,10 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         // Fractal iteration
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            if params.fractal_type.is_escape_time() {
+            if use_perturb {
+                pass.set_pipeline(&perturb_pipe);
+                pass.set_bind_group(0, &perturb_bg, &[]);
+            } else if params.fractal_type.is_escape_time() {
                 pass.set_pipeline(&esc_pipe);
                 pass.set_bind_group(0, &esc_bg, &[]);
             } else {
@@ -332,6 +396,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         }
 
         queue.submit(std::iter::once(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
     }
 
     // Finalize: divide by weight, pack to RGBA, copy to readback

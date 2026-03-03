@@ -21,8 +21,10 @@ struct Params {
 }
 
 struct PerturbParams {
-    ref_orbit_len: u32,     // number of valid entries in ref_orbit
-    _pad: vec3<u32>,
+    ref_orbit_len: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;

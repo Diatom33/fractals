@@ -63,6 +63,7 @@ pub struct GpuState {
     // Perturbation state
     pub using_perturbation: bool,
     ref_orbit_max_entries: u32, // current capacity of ref_orbit_buffer
+    cached_ref_orbit: Option<(f64, f64, u32, u32)>, // (cx, cy, max_iter, orbit_len)
 
     // Timing
     pub last_render_ms: f64,
@@ -322,6 +323,7 @@ impl GpuState {
             supersampling,
             using_perturbation: false,
             ref_orbit_max_entries,
+            cached_ref_orbit: None,
             last_render_ms: 0.0,
             gpu_name,
         }
@@ -469,31 +471,52 @@ impl GpuState {
         let pixel_step = (params.bounds[1] - params.bounds[0])
             / (self.display_width as f64 - 1.0).max(1.0);
         let use_perturb = params.fractal_type == crate::fractals::FractalType::Mandelbrot
-            && pixel_step < 1e-13;
+            && pixel_step < 1e-7;
         self.using_perturbation = use_perturb;
 
-        // Upload reference orbit if using perturbation
+        // Upload reference orbit if using perturbation (cached to avoid recomputation)
         if use_perturb {
-            self.ensure_ref_orbit_capacity(params.max_iter);
             let cx = (params.bounds[0] + params.bounds[1]) / 2.0;
             let cy = (params.bounds[2] + params.bounds[3]) / 2.0;
-            let perturb_data =
-                crate::fractals::compute_reference_orbit(cx, cy, params.max_iter, pixel_step);
-            // Upload orbit as flat f32 data
-            self.queue.write_buffer(
-                &self.ref_orbit_buffer,
-                0,
-                bytemuck::cast_slice(&perturb_data.orbit),
-            );
-            let perturb_gpu = PerturbGpuParams {
-                ref_orbit_len: perturb_data.orbit_len,
-                _pad: [0; 3],
+
+            let need_recompute = match self.cached_ref_orbit {
+                None => true,
+                Some((prev_cx, prev_cy, prev_iter, _)) => {
+                    prev_cx != cx || prev_cy != cy || prev_iter < params.max_iter
+                }
             };
-            self.queue.write_buffer(
-                &self.perturb_params_buffer,
-                0,
-                bytemuck::bytes_of(&perturb_gpu),
-            );
+
+            if need_recompute {
+                self.ensure_ref_orbit_capacity(params.max_iter);
+                let perturb_data =
+                    crate::fractals::compute_reference_orbit(cx, cy, params.max_iter, pixel_step);
+                self.queue.write_buffer(
+                    &self.ref_orbit_buffer,
+                    0,
+                    bytemuck::cast_slice(&perturb_data.orbit),
+                );
+                let perturb_gpu = PerturbGpuParams {
+                    ref_orbit_len: perturb_data.orbit_len,
+                    _pad: [0; 3],
+                };
+                self.queue.write_buffer(
+                    &self.perturb_params_buffer,
+                    0,
+                    bytemuck::bytes_of(&perturb_gpu),
+                );
+                self.cached_ref_orbit = Some((cx, cy, params.max_iter, perturb_data.orbit_len));
+            } else {
+                let orbit_len = self.cached_ref_orbit.unwrap().3;
+                let perturb_gpu = PerturbGpuParams {
+                    ref_orbit_len: orbit_len,
+                    _pad: [0; 3],
+                };
+                self.queue.write_buffer(
+                    &self.perturb_params_buffer,
+                    0,
+                    bytemuck::bytes_of(&perturb_gpu),
+                );
+            }
         }
 
         // Upload roots if needed
@@ -568,6 +591,7 @@ impl GpuState {
                 }
 
                 self.queue.submit(std::iter::once(encoder.finish()));
+                self.device.poll(wgpu::Maintain::Wait);
         }
 
         // Finalize pass: divide accumulated color by weight, pack to RGBA,

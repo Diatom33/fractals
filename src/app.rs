@@ -446,6 +446,14 @@ impl eframe::App for FractalApp {
                                     .color(egui::Color32::from_rgb(255, 200, 100)),
                             );
                         }
+                        let center_mag = xn.abs().max(xx.abs()).max(1e-10);
+                        let min_range = center_mag * 2e-14;
+                        if (xx - xn) < min_range * 5.0 {
+                            ui.monospace(
+                                egui::RichText::new("PRECISION LIMIT")
+                                    .color(egui::Color32::from_rgb(255, 100, 100)),
+                            );
+                        }
                     } else {
                         ui.monospace("GPU not initialized");
                     }
@@ -576,14 +584,21 @@ impl FractalApp {
                     let cy = y_min + frac_y * (y_max - y_min);
 
                     let factor: f64 = if scroll > 0.0 { 0.85 } else { 1.0 / 0.85 };
-                    self.history.push(self.params.bounds);
-                    self.params.bounds = [
-                        cx - (cx - x_min) * factor,
-                        cx + (x_max - cx) * factor,
-                        cy - (cy - y_min) * factor,
-                        cy + (y_max - cy) * factor,
-                    ];
-                    self.needs_render = true;
+                    let x_range = x_max - x_min;
+                    let center_mag = x_min.abs().max(x_max.abs()).max(1e-10);
+                    let min_range = center_mag * 2e-14;
+                    if x_range * factor < min_range && factor < 1.0 {
+                        // At f64 precision floor — don't zoom further
+                    } else {
+                        self.history.push(self.params.bounds);
+                        self.params.bounds = [
+                            cx - (cx - x_min) * factor,
+                            cx + (x_max - cx) * factor,
+                            cy - (cy - y_min) * factor,
+                            cy + (y_max - cy) * factor,
+                        ];
+                        self.needs_render = true;
+                    }
                 }
             }
         }
@@ -696,14 +711,19 @@ impl FractalApp {
                 let factor: f64 = if plus { 0.85 } else { 1.0 / 0.85 };
                 let cx = (x_min + x_max) * 0.5;
                 let cy = (y_min + y_max) * 0.5;
-                self.history.push(self.params.bounds);
-                self.params.bounds = [
-                    cx - (cx - x_min) * factor,
-                    cx + (x_max - cx) * factor,
-                    cy - (cy - y_min) * factor,
-                    cy + (y_max - cy) * factor,
-                ];
-                self.needs_render = true;
+                let x_range = x_max - x_min;
+                let center_mag = x_min.abs().max(x_max.abs()).max(1e-10);
+                let min_range = center_mag * 2e-14;
+                if !(x_range * factor < min_range && factor < 1.0) {
+                    self.history.push(self.params.bounds);
+                    self.params.bounds = [
+                        cx - (cx - x_min) * factor,
+                        cx + (x_max - cx) * factor,
+                        cy - (cy - y_min) * factor,
+                        cy + (y_max - cy) * factor,
+                    ];
+                    self.needs_render = true;
+                }
             }
         }
 
