@@ -198,12 +198,19 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         mapped_at_creation: false,
     });
 
+    // Decompose pixel_step into mantissa + exponent for extended-range perturbation
+    let step_y = (params.bounds[3] - params.bounds[2]) / (height as f64 - 1.0).max(1.0);
+    let ps_exp = pixel_step.log2().floor() as i32;
+    let ps_scale = 2.0_f64.powi(ps_exp);
+    let ps_mantissa_x = (pixel_step / ps_scale) as f32;
+    let ps_mantissa_y = (step_y / ps_scale) as f32;
+
     if use_perturb {
         let cx = (params.bounds[0] + params.bounds[1]) / 2.0;
         let cy = (params.bounds[2] + params.bounds[3]) / 2.0;
         let perturb_data = fractals::compute_reference_orbit(cx, cy, params.max_iter, pixel_step);
         queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
-        let pgpu = PerturbGpuParams { ref_orbit_len: perturb_data.orbit_len, _pad: [0; 3] };
+        let pgpu = PerturbGpuParams { ref_orbit_len: perturb_data.orbit_len, pixel_step_exp: ps_exp, _pad: [0; 2] };
         queue.write_buffer(&perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));
         println!("  Perturbation mode: ref orbit {} iters, precision for 1e-{:.0}", perturb_data.orbit_len, -pixel_step.log10());
     }
@@ -366,6 +373,10 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         let mut gpu_params = params.to_gpu_params(width, height, width);
         gpu_params.sample_offset = [offset_x, offset_y];
         gpu_params.sample_weight = weight;
+
+        if use_perturb {
+            gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
+        }
 
         queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&gpu_params));
 

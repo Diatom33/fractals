@@ -120,11 +120,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_iter = f32(params.max_iter);
     let smooth_iter = iterations[idx];
     let z = final_z[idx];
-    let color = colorize_sample(smooth_iter, z, max_iter);
-
-    // Accumulate: add weighted color to accumulation buffer
-    // accum.xyz = sum of weighted RGB, accum.w = sum of weights
-    let prev = accum[idx];
     let wt = params.sample_weight;
-    accum[idx] = prev + vec4<f32>(color * wt, wt);
+    let prev = accum[idx];
+
+    if params.color_mode == 0u {
+        // Escape-time: accumulate raw iteration data instead of colors.
+        // accum = (sum_smooth_iter_weighted, escaped_weight, total_weight, 0)
+        if smooth_iter < max_iter {
+            accum[idx] = prev + vec4<f32>(smooth_iter * wt, wt, wt, 0.0);
+        } else {
+            accum[idx] = prev + vec4<f32>(0.0, 0.0, wt, 0.0);
+        }
+    } else {
+        // Basin coloring: accumulate weighted color as before.
+        // accum.xyz = sum of weighted RGB, accum.w = sum of weights
+        let color = basin_color(smooth_iter, z, max_iter, params.num_roots);
+        accum[idx] = prev + vec4<f32>(color * wt, wt);
+    }
 }

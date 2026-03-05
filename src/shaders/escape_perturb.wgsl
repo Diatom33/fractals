@@ -1,6 +1,7 @@
-// Perturbation-theory Mandelbrot compute shader.
+// Perturbation-theory Mandelbrot compute shader with extended-range floats.
 // Uses a pre-computed reference orbit (arbitrary precision on CPU, stored as f32)
-// and computes per-pixel perturbation deltas at f32 precision.
+// and computes per-pixel perturbation deltas using mantissa * 2^exponent representation.
+// This allows zoom depths far beyond f32's ~1e-38 limit (to 1e-300+).
 // Rebasing prevents glitches without multi-round rendering.
 
 struct Params {
@@ -22,9 +23,9 @@ struct Params {
 
 struct PerturbParams {
     ref_orbit_len: u32,
+    pixel_step_exp: i32,
     _pad1: u32,
     _pad2: u32,
-    _pad3: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -36,6 +37,11 @@ struct PerturbParams {
 // Complex multiply
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+// ldexp for vec2
+fn ldexp_v2(v: vec2<f32>, e: i32) -> vec2<f32> {
+    return vec2<f32>(ldexp(v.x, e), ldexp(v.y, e));
 }
 
 @compute @workgroup_size(16, 16)
@@ -50,20 +56,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_i = params.max_iter;
     let ref_len = perturb.ref_orbit_len;
 
-    // delta_c: pixel offset from reference point (center) in complex plane.
-    // At deep zoom, pixel_step is tiny but that's fine — delta_c just needs
-    // to represent the RELATIVE offset, which fits in f32.
+    // delta_c in extended-range: pixel_step is mantissa, pixel_step_exp is exponent
     let dx_pixels = f32(x) + params.sample_offset.x - f32(w - 1u) * 0.5;
     let dy_pixels = f32(y) + params.sample_offset.y - f32(h - 1u) * 0.5;
-    let dc = vec2<f32>(
+    let dc_raw = vec2<f32>(
         dx_pixels * params.pixel_step.x,
         dy_pixels * params.pixel_step.y,
     );
+    // Normalize dc mantissa
+    var dc_m = dc_raw;
+    var dc_e = perturb.pixel_step_exp;
+    let dc_mag = max(abs(dc_m.x), abs(dc_m.y));
+    if dc_mag > 0.0 {
+        let dc_shift = i32(floor(log2(dc_mag)));
+        dc_m = ldexp_v2(dc_m, -dc_shift);
+        dc_e = dc_e + dc_shift;
+    }
 
-    // Perturbation iteration
-    var dn = vec2<f32>(0.0, 0.0);  // delta_0 = 0 (both orbits start at z=0)
+    // Perturbation iteration with extended-range delta
+    var dn_m = vec2<f32>(0.0, 0.0);  // mantissa
+    var dn_e: i32 = 0;                // exponent (arbitrary, dn starts at 0)
     var iter: u32 = max_i;
-    var ref_i: u32 = 0u;           // current index into reference orbit
+    var ref_i: u32 = 0u;
 
     for (var i: u32 = 0u; i < max_i; i++) {
         if ref_i >= ref_len { break; }
@@ -71,25 +85,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let Zn = ref_orbit[ref_i];
 
         // delta_{n+1} = 2 * Z_n * delta_n + delta_n^2 + delta_c
-        let two_Zn_dn = vec2<f32>(
-            2.0 * (Zn.x * dn.x - Zn.y * dn.y),
-            2.0 * (Zn.x * dn.y + Zn.y * dn.x),
+        // Term 1: 2 * Z_n * dn_m, at exponent dn_e
+        let t1 = vec2<f32>(
+            2.0 * (Zn.x * dn_m.x - Zn.y * dn_m.y),
+            2.0 * (Zn.x * dn_m.y + Zn.y * dn_m.x),
         );
-        let dn_sq = vec2<f32>(
-            dn.x * dn.x - dn.y * dn.y,
-            2.0 * dn.x * dn.y,
+        let t1_e = dn_e;
+
+        // Term 2: dn_m^2, at exponent 2*dn_e
+        let t2 = vec2<f32>(
+            dn_m.x * dn_m.x - dn_m.y * dn_m.y,
+            2.0 * dn_m.x * dn_m.y,
         );
-        dn = two_Zn_dn + dn_sq + dc;
+        let t2_e = 2 * dn_e;
+
+        // Term 3: dc, at exponent dc_e
+        let t3 = dc_m;
+        let t3_e = dc_e;
+
+        // Find max exponent and shift all terms to it
+        let e_new = max(t1_e, max(t2_e, t3_e));
+        let s1 = ldexp_v2(t1, t1_e - e_new);
+        let s2 = ldexp_v2(t2, t2_e - e_new);
+        let s3 = ldexp_v2(t3, t3_e - e_new);
+
+        dn_m = s1 + s2 + s3;
+        dn_e = e_new;
+
+        // Renormalize to keep mantissa in good range
+        let mag = max(abs(dn_m.x), abs(dn_m.y));
+        if mag > 0.0 {
+            let shift_val = i32(floor(log2(mag)));
+            dn_m = ldexp_v2(dn_m, -shift_val);
+            dn_e = dn_e + shift_val;
+        }
+
         ref_i += 1u;
 
         // Full orbit value: z_{n+1} = Z_{n+1} + delta_{n+1}
-        // Use ref_orbit[ref_i] which is Z_{n+1} (we already incremented ref_i)
+        // Convert delta back to f32 (may underflow to 0 for deep zoom — that's correct)
+        let dn_real = ldexp_v2(dn_m, dn_e);
         var z_full: vec2<f32>;
         if ref_i < ref_len {
-            z_full = ref_orbit[ref_i] + dn;
+            z_full = ref_orbit[ref_i] + dn_real;
         } else {
-            // Reference escaped; use last known Z + delta as approximation
-            z_full = Zn + dn;
+            z_full = Zn + dn_real;
         }
 
         // Escape check
@@ -99,13 +139,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             break;
         }
 
-        // Rebasing: if the full orbit passes near 0, the perturbation has
-        // grown to nearly cancel the reference. Reset delta to the full value
-        // and restart from the beginning of the reference orbit.
-        // This prevents glitches without needing multiple reference orbits.
-        let dn_mag2 = dot(dn, dn);
+        // Rebasing: if full orbit passes near 0, reset delta to the full value
+        let dn_mag2 = dot(dn_real, dn_real);
         if dot(z_full, z_full) < dn_mag2 {
-            dn = z_full;
+            dn_m = z_full;
+            dn_e = 0;
             ref_i = 0u;
         }
     }
@@ -113,11 +151,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Smooth iteration count
     var smooth_val: f32;
     if iter < max_i {
+        let dn_final = ldexp_v2(dn_m, dn_e);
         var z_final: vec2<f32>;
         if ref_i < ref_len {
-            z_final = ref_orbit[ref_i] + dn;
+            z_final = ref_orbit[ref_i] + dn_final;
         } else {
-            z_final = dn; // fallback
+            z_final = dn_final;
         }
         let mag2 = dot(z_final, z_final);
         let log_zn = log2(mag2) * 0.5;
@@ -129,9 +168,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     iterations[idx] = smooth_val;
 
     // Store final z for coloring
+    let dn_out = ldexp_v2(dn_m, dn_e);
     if ref_i < ref_len {
-        final_z[idx] = ref_orbit[ref_i] + dn;
+        final_z[idx] = ref_orbit[ref_i] + dn_out;
     } else {
-        final_z[idx] = dn;
+        final_z[idx] = dn_out;
     }
 }

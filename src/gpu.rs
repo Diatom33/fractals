@@ -474,6 +474,16 @@ impl GpuState {
             && pixel_step < 1e-7;
         self.using_perturbation = use_perturb;
 
+        // Decompose pixel_step into f32 mantissa + i32 exponent for extended-range perturbation
+        let step_x = (params.bounds[1] - params.bounds[0])
+            / (self.display_width as f64 - 1.0).max(1.0);
+        let step_y = (params.bounds[3] - params.bounds[2])
+            / (self.height as f64 - 1.0).max(1.0);
+        let ps_exp = pixel_step.log2().floor() as i32;
+        let scale = 2.0_f64.powi(ps_exp);
+        let ps_mantissa_x = (step_x / scale) as f32;
+        let ps_mantissa_y = (step_y / scale) as f32;
+
         // Upload reference orbit if using perturbation (cached to avoid recomputation)
         if use_perturb {
             let cx = (params.bounds[0] + params.bounds[1]) / 2.0;
@@ -497,7 +507,8 @@ impl GpuState {
                 );
                 let perturb_gpu = PerturbGpuParams {
                     ref_orbit_len: perturb_data.orbit_len,
-                    _pad: [0; 3],
+                    pixel_step_exp: ps_exp,
+                    _pad: [0; 2],
                 };
                 self.queue.write_buffer(
                     &self.perturb_params_buffer,
@@ -509,7 +520,8 @@ impl GpuState {
                 let orbit_len = self.cached_ref_orbit.unwrap().3;
                 let perturb_gpu = PerturbGpuParams {
                     ref_orbit_len: orbit_len,
-                    _pad: [0; 3],
+                    pixel_step_exp: ps_exp,
+                    _pad: [0; 2],
                 };
                 self.queue.write_buffer(
                     &self.perturb_params_buffer,
@@ -547,6 +559,11 @@ impl GpuState {
                 let mut gpu_params = params.to_gpu_params(self.display_width, self.height, self.width);
                 gpu_params.sample_offset = [offset_x, offset_y];
                 gpu_params.sample_weight = weight;
+
+                // When using perturbation, pixel_step carries mantissa; exponent is in PerturbParams
+                if use_perturb {
+                    gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
+                }
 
                 self.queue.write_buffer(
                     &self.params_buffer,

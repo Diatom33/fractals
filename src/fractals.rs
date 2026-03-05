@@ -249,7 +249,8 @@ pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PerturbGpuParams {
     pub ref_orbit_len: u32,
-    pub _pad: [u32; 3],
+    pub pixel_step_exp: i32,
+    pub _pad: [u32; 2],
 }
 
 /// Data for perturbation rendering: reference orbit + metadata.
