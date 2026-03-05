@@ -201,7 +201,7 @@ impl Default for FractalParams {
             relaxation: 1.0,
             poly_degree: 3,
             supersampling: 1,
-            palette: ColorPalette::Classic,
+            palette: ColorPalette::Oklab,
         }
     }
 }
@@ -321,7 +321,7 @@ impl FractalParams {
 ///
 /// Quality levels:
 ///   ss=1: Off (1 sample at center)
-///   ss=2: 4x4 grid within pixel — 16 samples
+///   ss=2: 6x6 grid within pixel — 36 samples
 ///   ss=3: 8x8 grid within pixel — 64 samples
 pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
     if ss <= 1 {
@@ -329,7 +329,7 @@ pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
     }
 
     let grid_n: u32 = match ss {
-        2 => 4,
+        2 => 6,
         _ => 8,
     };
 

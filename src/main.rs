@@ -62,7 +62,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     }
 
     // Parse --supersample (1, 2, or 3)
-    if let Some(pos) = args.iter().position(|a| a == "--supersample") {
+    if let Some(pos) = args.iter().position(|a| a == "--supersample" || a == "--ss") {
         if let Some(val) = args.get(pos + 1) {
             if let Ok(ss) = val.parse::<u32>() {
                 params.supersampling = ss.clamp(1, 3);
