@@ -70,6 +70,18 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         }
     }
 
+    // Parse --palette (classic, oklab, smooth, mono)
+    if let Some(pos) = args.iter().position(|a| a == "--palette") {
+        if let Some(name) = args.get(pos + 1) {
+            params.palette = match name.to_lowercase().as_str() {
+                "oklab" => fractals::ColorPalette::Oklab,
+                "smooth" => fractals::ColorPalette::Smooth,
+                "mono" | "monochrome" => fractals::ColorPalette::Monochrome,
+                _ => fractals::ColorPalette::Classic,
+            };
+        }
+    }
+
     // Parse --iter
     if let Some(pos) = args.iter().position(|a| a == "--iter") {
         if let Some(val) = args.get(pos + 1) {

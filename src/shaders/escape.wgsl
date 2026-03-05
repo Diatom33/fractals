@@ -17,7 +17,9 @@ struct Params {
     num_roots: u32,
     sample_offset: vec2<f32>,    // sub-pixel offset in pixel units
     sample_weight: f32,
-    stride: u32,                 // buffer row width in pixels
+    stride: u32,
+    palette: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;

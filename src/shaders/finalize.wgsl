@@ -19,6 +19,8 @@ struct Params {
     sample_offset: vec2<f32>,
     sample_weight: f32,
     stride: u32,
+    palette: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;

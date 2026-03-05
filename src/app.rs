@@ -266,6 +266,25 @@ impl eframe::App for FractalApp {
                             self.needs_render = true;
                         }
 
+                        ui.add_space(2.0);
+                        ui.label("Color palette:");
+                        let prev_palette = self.params.palette;
+                        egui::ComboBox::from_id_salt("palette")
+                            .width(ui.available_width() - 8.0)
+                            .selected_text(self.params.palette.name())
+                            .show_ui(ui, |ui| {
+                                for &p in crate::fractals::ColorPalette::ALL {
+                                    ui.selectable_value(
+                                        &mut self.params.palette,
+                                        p,
+                                        p.name(),
+                                    );
+                                }
+                            });
+                        if self.params.palette != prev_palette {
+                            self.needs_render = true;
+                        }
+
                         let controls = self.params.fractal_type.visible_controls();
 
                         if controls.power {

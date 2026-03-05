@@ -148,6 +148,42 @@ pub struct FractalParams {
     pub relaxation: f32,      // Nova relaxation parameter a
     pub poly_degree: u32,     // Newton/Nova polynomial degree n (for z^n - 1)
     pub supersampling: u32,   // 1 = off, 2 = 2x2, 3 = 3x3
+    pub palette: ColorPalette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorPalette {
+    Classic,     // 0: HSV oscillating hue (original)
+    Oklab,       // 1: Perceptually uniform lightness, varying hue
+    Smooth,      // 2: iq-style cosine gradient
+    Monochrome,  // 3: Single hue (blue), varying lightness
+}
+
+impl ColorPalette {
+    pub const ALL: &[ColorPalette] = &[
+        ColorPalette::Classic,
+        ColorPalette::Oklab,
+        ColorPalette::Smooth,
+        ColorPalette::Monochrome,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ColorPalette::Classic => "Classic HSV",
+            ColorPalette::Oklab => "Oklab Uniform",
+            ColorPalette::Smooth => "Smooth Gradient",
+            ColorPalette::Monochrome => "Monochrome",
+        }
+    }
+
+    pub fn shader_index(&self) -> u32 {
+        match self {
+            ColorPalette::Classic => 0,
+            ColorPalette::Oklab => 1,
+            ColorPalette::Smooth => 2,
+            ColorPalette::Monochrome => 3,
+        }
+    }
 }
 
 impl Default for FractalParams {
@@ -165,6 +201,7 @@ impl Default for FractalParams {
             relaxation: 1.0,
             poly_degree: 3,
             supersampling: 1,
+            palette: ColorPalette::Classic,
         }
     }
 }
@@ -268,6 +305,8 @@ impl FractalParams {
             sample_offset: [0.0, 0.0],
             sample_weight: 1.0,
             stride,
+            palette: self.palette.shader_index(),
+            _pad: 0,
         }
     }
 }
@@ -425,5 +464,7 @@ pub struct GpuParams {
     pub sample_offset: [f32; 2],   // 8 bytes  (offset 64) — sub-pixel offset in pixel units
     pub sample_weight: f32,        // 4 bytes  (offset 72)
     pub stride: u32,               // 4 bytes  (offset 76)
+    pub palette: u32,              // 4 bytes  (offset 80)
+    pub _pad: u32,                 // 4 bytes  (offset 84) — align to 88 (multiple of 8 for WGSL vec2 alignment)
 }
-// Total: 80 bytes, no padding needed
+// Total: 88 bytes
