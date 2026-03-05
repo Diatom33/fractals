@@ -187,7 +187,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     });
     let ref_orbit_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: (params.max_iter as u64 + 1) * 8,
+        size: (params.max_iter as u64 + 1) * 16,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });

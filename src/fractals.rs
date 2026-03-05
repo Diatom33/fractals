@@ -330,8 +330,10 @@ pub struct PerturbGpuParams {
 
 /// Data for perturbation rendering: reference orbit + metadata.
 pub struct PerturbData {
-    /// Reference orbit Z_n values as f32 pairs, len = orbit_len.
-    pub orbit: Vec<[f32; 2]>,
+    /// Reference orbit Z_n as double-single f32 quads: [re_hi, im_hi, re_lo, im_lo].
+    /// Double-single gives ~48-bit mantissa (~15 decimal digits) vs f32's ~7 digits,
+    /// pushing the perturbation precision artifact much deeper.
+    pub orbit: Vec<[f32; 4]>,
     /// How many iterations before reference escaped (or max_iter).
     pub orbit_len: u32,
 }
@@ -366,7 +368,14 @@ pub fn compute_reference_orbit(
     let escape_r2 = 256.0_f64;
 
     for _ in 0..max_iter {
-        orbit.push([z_re.to_f32(), z_im.to_f32()]);
+        // Store orbit as double-single (Dekker split of f64 → f32 hi + f32 lo)
+        let zr_f64 = z_re.to_f64();
+        let zi_f64 = z_im.to_f64();
+        let zr_hi = zr_f64 as f32;
+        let zr_lo = (zr_f64 - zr_hi as f64) as f32;
+        let zi_hi = zi_f64 as f32;
+        let zi_lo = (zi_f64 - zi_hi as f64) as f32;
+        orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
 
         // z = z^2 + c using in-place ops (no heap allocs)
         zr2.assign(z_re.square_ref());       // zr2 = z_re^2
@@ -379,12 +388,15 @@ pub fn compute_reference_orbit(
         z_im.assign(&zri << 1u32);           // z_im = 2 * zri
         z_im += &c_im;                       // z_im += c_im
 
-        // Escape check using f64 (avoids 2 arb-prec multiplications;
-        // f64 is more than sufficient for checking |z|^2 > 256)
+        // Escape check using f64 (avoids 2 arb-prec multiplications)
         let zr = z_re.to_f64();
         let zi = z_im.to_f64();
         if zr * zr + zi * zi > escape_r2 {
-            orbit.push([zr as f32, zi as f32]);
+            let zr_hi = zr as f32;
+            let zr_lo = (zr - zr_hi as f64) as f32;
+            let zi_hi = zi as f32;
+            let zi_lo = (zi - zi_hi as f64) as f32;
+            orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
             break;
         }
     }

@@ -1,6 +1,7 @@
 // Perturbation-theory Mandelbrot compute shader with extended-range floats.
-// Uses a pre-computed reference orbit (arbitrary precision on CPU, stored as f32)
-// and computes per-pixel perturbation deltas using mantissa * 2^exponent representation.
+// Uses a pre-computed reference orbit (arbitrary precision on CPU, stored as
+// double-single f32 pairs) and computes per-pixel perturbation deltas using
+// mantissa * 2^exponent representation.
 // This allows zoom depths far beyond f32's ~1e-38 limit (to 1e-300+).
 // Rebasing prevents glitches without multi-round rendering.
 
@@ -31,7 +32,7 @@ struct PerturbParams {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> iterations: array<f32>;
 @group(0) @binding(2) var<storage, read_write> final_z: array<vec2<f32>>;
-@group(0) @binding(3) var<storage, read> ref_orbit: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> ref_orbit: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> perturb: PerturbParams;
 
 // Complex multiply
@@ -82,14 +83,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i: u32 = 0u; i < max_i; i++) {
         if ref_i >= ref_len { break; }
 
+        // Read Z_n as double-single: (re_hi, im_hi, re_lo, im_lo)
         let Zn = ref_orbit[ref_i];
+        let Zn_re_hi = Zn.x;
+        let Zn_im_hi = Zn.y;
+        let Zn_re_lo = Zn.z;
+        let Zn_im_lo = Zn.w;
 
         // delta_{n+1} = 2 * Z_n * delta_n + delta_n^2 + delta_c
-        // Term 1: 2 * Z_n * dn_m, at exponent dn_e
-        let t1 = vec2<f32>(
-            2.0 * (Zn.x * dn_m.x - Zn.y * dn_m.y),
-            2.0 * (Zn.x * dn_m.y + Zn.y * dn_m.x),
-        );
+        //
+        // Term 1: 2 * Z_n * dn_m (complex multiply with double-single Z_n)
+        // Using FMA to get best f32 approximation of (Zn_hi + Zn_lo) * dn
+        let a = fma(Zn_re_hi, dn_m.x, Zn_re_lo * dn_m.x);  // Zn_re * dn_re
+        let b = fma(Zn_im_hi, dn_m.y, Zn_im_lo * dn_m.y);  // Zn_im * dn_im
+        let c = fma(Zn_re_hi, dn_m.y, Zn_re_lo * dn_m.y);  // Zn_re * dn_im
+        let d = fma(Zn_im_hi, dn_m.x, Zn_im_lo * dn_m.x);  // Zn_im * dn_re
+        let t1 = vec2<f32>(2.0 * (a - b), 2.0 * (c + d));
         let t1_e = dn_e;
 
         // Term 2: dn_m^2, at exponent 2*dn_e
@@ -123,13 +132,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         ref_i += 1u;
 
         // Full orbit value: z_{n+1} = Z_{n+1} + delta_{n+1}
-        // Convert delta back to f32 (may underflow to 0 for deep zoom — that's correct)
+        // Use hi part of Z for f32 result (sufficient for escape check)
         let dn_real = ldexp_v2(dn_m, dn_e);
         var z_full: vec2<f32>;
         if ref_i < ref_len {
-            z_full = ref_orbit[ref_i] + dn_real;
+            let Zn1 = ref_orbit[ref_i];
+            z_full = vec2<f32>(Zn1.x, Zn1.y) + dn_real;
         } else {
-            z_full = Zn + dn_real;
+            z_full = vec2<f32>(Zn_re_hi, Zn_im_hi) + dn_real;
         }
 
         // Escape check
@@ -154,7 +164,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dn_final = ldexp_v2(dn_m, dn_e);
         var z_final: vec2<f32>;
         if ref_i < ref_len {
-            z_final = ref_orbit[ref_i] + dn_final;
+            let Zn_f = ref_orbit[ref_i];
+            z_final = vec2<f32>(Zn_f.x, Zn_f.y) + dn_final;
         } else {
             z_final = dn_final;
         }
@@ -170,7 +181,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Store final z for coloring
     let dn_out = ldexp_v2(dn_m, dn_e);
     if ref_i < ref_len {
-        final_z[idx] = ref_orbit[ref_i] + dn_out;
+        let Zn_o = ref_orbit[ref_i];
+        final_z[idx] = vec2<f32>(Zn_o.x, Zn_o.y) + dn_out;
     } else {
         final_z[idx] = dn_out;
     }

@@ -150,7 +150,7 @@ impl GpuState {
         let ref_orbit_max_entries = 50000u32;
         let ref_orbit_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ref_orbit"),
-            size: ref_orbit_max_entries as u64 * 8, // vec2<f32> per entry
+            size: ref_orbit_max_entries as u64 * 16, // vec4<f32> per entry (double-single)
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -444,7 +444,7 @@ impl GpuState {
             self.ref_orbit_max_entries = needed;
             self.ref_orbit_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("ref_orbit"),
-                size: needed as u64 * 8,
+                size: needed as u64 * 16,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
