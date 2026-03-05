@@ -46,7 +46,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var color: vec3<f32>;
     if weight > 0.0 {
-        color = clamp(a.xyz / weight, vec3<f32>(0.0), vec3<f32>(1.0));
+        // Gamma-encode after averaging in linear space (linear → sRGB)
+        color = pow(clamp(a.xyz / weight, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
     } else {
         color = vec3<f32>(0.0);
     }

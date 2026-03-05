@@ -120,5 +120,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         color = basin_color(smooth_iter, z, max_iter, params.num_roots);
     }
 
-    accum[idx] = prev + vec4<f32>(color * wt, wt);
+    // Linearize before accumulation (sRGB → linear) for gamma-correct averaging.
+    // Without this, averaging in sRGB space darkens and desaturates boundary pixels.
+    let linear = pow(color, vec3<f32>(2.2));
+    accum[idx] = prev + vec4<f32>(linear * wt, wt);
 }
