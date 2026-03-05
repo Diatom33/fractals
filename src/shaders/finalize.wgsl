@@ -1,9 +1,8 @@
 // Finalize compute shader.
-// For escape-time (color_mode 0): reads accumulated iteration data, computes
-// color from the averaged smooth iteration count.
-// For basin coloring (color_mode 1): reads accumulated weighted color, divides
-// by total weight.
-// Packs result to RGBA u32 for the output buffer / texture copy.
+// Reads accumulated weighted color (rgb + weight), divides by total weight,
+// packs result to RGBA u32 for the output buffer / texture copy.
+// Both escape-time and basin coloring use the same path since colorize.wgsl
+// now does color-domain averaging for both modes.
 
 struct Params {
     center_hi: vec2<f32>,
@@ -33,37 +32,6 @@ fn pack_rgba(rgb: vec3<f32>) -> u32 {
     return r | (g << 8u) | (b << 16u) | (255u << 24u);
 }
 
-// -- HSV to RGB (duplicated from colorize.wgsl — WGSL has no includes) --------
-
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
-    let h6 = h * 6.0;
-    let i = u32(floor(h6)) % 6u;
-    let f = h6 - floor(h6);
-    let p = v * (1.0 - s);
-    let q = v * (1.0 - s * f);
-    let t = v * (1.0 - s * (1.0 - f));
-
-    switch i {
-        case 0u: { return vec3<f32>(v, t, p); }
-        case 1u: { return vec3<f32>(q, v, p); }
-        case 2u: { return vec3<f32>(p, v, t); }
-        case 3u: { return vec3<f32>(p, q, v); }
-        case 4u: { return vec3<f32>(t, p, v); }
-        default: { return vec3<f32>(v, p, q); }
-    }
-}
-
-// -- Escape-time palette (duplicated from colorize.wgsl) ----------------------
-
-fn escape_color(smooth_iter: f32) -> vec3<f32> {
-    let log_iter = log2(smooth_iter + 1.0);
-    let hue = fract(log_iter * 0.15 + 0.6);
-    let sat = 0.7 + 0.3 * cos(log_iter * 0.5);
-    let val = 0.85 + 0.15 * cos(log_iter * 0.7);
-
-    return hsv_to_rgb(hue, sat, val);
-}
-
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -74,28 +42,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * params.stride + x;
     let a = accum[idx];
-    var color: vec3<f32>;
+    let weight = a.w;
 
-    if params.color_mode == 0u {
-        // Escape-time: accum = (sum_smooth_iter_weighted, escaped_weight, total_weight, 0)
-        let escaped_wt = a.y;
-        let total_wt = a.z;
-        if escaped_wt > 0.0 {
-            let avg_iter = a.x / escaped_wt;
-            let escaped_color = escape_color(avg_iter);
-            // Blend with black based on fraction of samples that escaped
-            color = escaped_color * (escaped_wt / total_wt);
-        } else {
-            color = vec3<f32>(0.0, 0.0, 0.0);
-        }
+    var color: vec3<f32>;
+    if weight > 0.0 {
+        color = clamp(a.xyz / weight, vec3<f32>(0.0), vec3<f32>(1.0));
     } else {
-        // Basin coloring: accum.xyz = sum of weighted RGB, accum.w = sum of weights
-        let weight = a.w;
-        if weight > 0.0 {
-            color = clamp(a.xyz / weight, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-        } else {
-            color = vec3<f32>(0.0, 0.0, 0.0);
-        }
+        color = vec3<f32>(0.0);
     }
 
     output[idx] = pack_rgba(color);

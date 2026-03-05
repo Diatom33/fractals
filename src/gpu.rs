@@ -4,6 +4,7 @@
 /// accumulated into a float buffer. A final pass normalizes and packs to RGBA.
 
 use crate::fractals::{FractalParams, GpuParams, PerturbGpuParams};
+use rug::Float;
 
 /// Align width so bytes_per_row (width * 4) is a multiple of COPY_BYTES_PER_ROW_ALIGNMENT (256).
 pub fn align_width(w: u32) -> u32 {
@@ -57,13 +58,14 @@ pub struct GpuState {
     pub display_width: u32,   // actual visible display width (texture width)
     pub height: u32,
 
-    // Current supersampling factor (1, 2, or 3) — kept for app.rs compatibility
-    pub supersampling: u32,
 
     // Perturbation state
     pub using_perturbation: bool,
     ref_orbit_max_entries: u32, // current capacity of ref_orbit_buffer
-    cached_ref_orbit: Option<(f64, f64, u32, u32)>, // (cx, cy, max_iter, orbit_len)
+    cached_ref_orbit: Option<(Float, Float, u32, u32)>, // (center_re, center_im, max_iter, orbit_len)
+
+    // Staging buffer for batched sample params (avoids per-sample GPU sync)
+    params_staging_buffer: wgpu::Buffer,
 
     // Timing
     pub last_render_ms: f64,
@@ -80,7 +82,6 @@ impl GpuState {
         let display_width = 960u32;
         let width = align_width(display_width);
         let height = 720u32;
-        let supersampling = 1u32;
         let out_pixels = (width * height) as u64;
 
         // Create shader modules
@@ -290,6 +291,14 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        // Staging buffer for batched sample params (64 samples max × 80 bytes)
+        let params_staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("params_staging"),
+            size: 64 * std::mem::size_of::<GpuParams>() as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         GpuState {
             device: device.clone(),
             queue: queue.clone(),
@@ -320,28 +329,24 @@ impl GpuState {
             width,
             display_width,
             height,
-            supersampling,
             using_perturbation: false,
             ref_orbit_max_entries,
             cached_ref_orbit: None,
+            params_staging_buffer,
             last_render_ms: 0.0,
             gpu_name,
         }
     }
 
-    /// Resize GPU buffers and texture to new dimensions and/or supersampling.
-    /// Buffers use aligned stride for wgpu row alignment; texture matches display exactly.
-    pub fn resize(&mut self, display_w: u32, height: u32, supersampling: u32) {
+    /// Resize GPU buffers to new dimensions.
+    /// Buffers use aligned stride for wgpu row alignment.
+    pub fn resize(&mut self, display_w: u32, height: u32) {
         let stride = align_width(display_w);
-        if display_w == self.display_width && stride == self.width && height == self.height && supersampling == self.supersampling {
+        if display_w == self.display_width && stride == self.width && height == self.height {
             return;
         }
 
-        // Track supersampling for change detection (app.rs checks this field)
-        self.supersampling = supersampling;
-
-        // Only rebuild buffers/texture if dimensions changed
-        if display_w != self.display_width || stride != self.width || height != self.height {
+        {
             self.display_width = display_w;
             self.width = stride;
             self.height = height;
@@ -460,25 +465,22 @@ impl GpuState {
 
     /// Run the fractal compute + colorize pipeline with multi-pass accumulation
     /// supersampling, then finalize and update the display texture.
-    pub fn render(&mut self, params: &FractalParams) {
+    pub fn render(&mut self, params: &FractalParams, effective_ss: u32) {
         let start = std::time::Instant::now();
 
-        let ss = params.supersampling;
+        let ss = effective_ss;
         let wg_x = (self.display_width + 15) / 16;
         let wg_y = (self.height + 15) / 16;
 
         // Determine if we should use perturbation (deep zoom Mandelbrot only)
-        let pixel_step = (params.bounds[1] - params.bounds[0])
-            / (self.display_width as f64 - 1.0).max(1.0);
+        let pixel_step = params.pixel_step_x(self.display_width);
         let use_perturb = params.fractal_type == crate::fractals::FractalType::Mandelbrot
             && pixel_step < 1e-7;
         self.using_perturbation = use_perturb;
 
         // Decompose pixel_step into f32 mantissa + i32 exponent for extended-range perturbation
-        let step_x = (params.bounds[1] - params.bounds[0])
-            / (self.display_width as f64 - 1.0).max(1.0);
-        let step_y = (params.bounds[3] - params.bounds[2])
-            / (self.height as f64 - 1.0).max(1.0);
+        let step_x = params.pixel_step_x(self.display_width);
+        let step_y = params.pixel_step_y(self.height);
         let ps_exp = pixel_step.log2().floor() as i32;
         let scale = 2.0_f64.powi(ps_exp);
         let ps_mantissa_x = (step_x / scale) as f32;
@@ -486,20 +488,19 @@ impl GpuState {
 
         // Upload reference orbit if using perturbation (cached to avoid recomputation)
         if use_perturb {
-            let cx = (params.bounds[0] + params.bounds[1]) / 2.0;
-            let cy = (params.bounds[2] + params.bounds[3]) / 2.0;
-
-            let need_recompute = match self.cached_ref_orbit {
+            let need_recompute = match &self.cached_ref_orbit {
                 None => true,
-                Some((prev_cx, prev_cy, prev_iter, _)) => {
-                    prev_cx != cx || prev_cy != cy || prev_iter < params.max_iter
+                Some((prev_re, prev_im, prev_iter, _)) => {
+                    *prev_re != params.center_re
+                        || *prev_im != params.center_im
+                        || *prev_iter < params.max_iter
                 }
             };
 
             if need_recompute {
                 self.ensure_ref_orbit_capacity(params.max_iter);
                 let perturb_data =
-                    crate::fractals::compute_reference_orbit(cx, cy, params.max_iter, pixel_step);
+                    crate::fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step);
                 self.queue.write_buffer(
                     &self.ref_orbit_buffer,
                     0,
@@ -515,9 +516,9 @@ impl GpuState {
                     0,
                     bytemuck::bytes_of(&perturb_gpu),
                 );
-                self.cached_ref_orbit = Some((cx, cy, params.max_iter, perturb_data.orbit_len));
+                self.cached_ref_orbit = Some((params.center_re.clone(), params.center_im.clone(), params.max_iter, perturb_data.orbit_len));
             } else {
-                let orbit_len = self.cached_ref_orbit.unwrap().3;
+                let orbit_len = self.cached_ref_orbit.as_ref().unwrap().3;
                 let perturb_gpu = PerturbGpuParams {
                     ref_orbit_len: orbit_len,
                     pixel_step_exp: ps_exp,
@@ -542,113 +543,94 @@ impl GpuState {
         }
 
         let samples = crate::fractals::compute_samples(ss);
+        let params_size = std::mem::size_of::<GpuParams>() as u64;
 
-        // First submit: clear the accum buffer
-        {
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("clear accum"),
-                });
-            encoder.clear_buffer(&self.accum_buffer, 0, None);
-            self.queue.submit(std::iter::once(encoder.finish()));
-        }
-
-        // Multi-pass: for each sub-pixel sample, write params then dispatch
-        for &(offset_x, offset_y, weight) in &samples {
-                let mut gpu_params = params.to_gpu_params(self.display_width, self.height, self.width);
-                gpu_params.sample_offset = [offset_x, offset_y];
-                gpu_params.sample_weight = weight;
-
-                // When using perturbation, pixel_step carries mantissa; exponent is in PerturbParams
-                if use_perturb {
-                    gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
-                }
-
-                self.queue.write_buffer(
-                    &self.params_buffer,
-                    0,
-                    bytemuck::bytes_of(&gpu_params),
-                );
-
-                let mut encoder = self
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("sample pass"),
-                    });
-
-                // Pass 1: Fractal iteration
-                {
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("iterate"),
-                        timestamp_writes: None,
-                    });
-                    if use_perturb {
-                        pass.set_pipeline(&self.perturb_pipeline);
-                        pass.set_bind_group(0, &self.perturb_bind_group, &[]);
-                    } else if params.fractal_type.is_escape_time() {
-                        pass.set_pipeline(&self.escape_pipeline);
-                        pass.set_bind_group(0, &self.escape_bind_group, &[]);
-                    } else {
-                        pass.set_pipeline(&self.newton_pipeline);
-                        pass.set_bind_group(0, &self.newton_bind_group, &[]);
-                    }
-                    pass.dispatch_workgroups(wg_x, wg_y, 1);
-                }
-
-                // Pass 2: Colorize and accumulate into accum buffer
-                {
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("accumulate"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(&self.colorize_pipeline);
-                    pass.set_bind_group(0, &self.colorize_bind_group, &[]);
-                    pass.dispatch_workgroups(wg_x, wg_y, 1);
-                }
-
-                self.queue.submit(std::iter::once(encoder.finish()));
-                self.device.poll(wgpu::Maintain::Wait);
-        }
-
-        // Finalize pass: divide accumulated color by weight, pack to RGBA,
-        // then copy output buffer to texture
-        {
-            // Write final params (just needs resolution + stride for the finalize shader)
-            let gpu_params = params.to_gpu_params(self.display_width, self.height, self.width);
+        // Stage all sample params into staging buffer (CPU side, no GPU sync needed)
+        let base_gpu_params = params.to_gpu_params(self.display_width, self.height, self.width);
+        for (i, &(offset_x, offset_y, weight)) in samples.iter().enumerate() {
+            let mut gpu_params = base_gpu_params;
+            gpu_params.sample_offset = [offset_x, offset_y];
+            gpu_params.sample_weight = weight;
+            if use_perturb {
+                gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
+            }
             self.queue.write_buffer(
-                &self.params_buffer,
-                0,
+                &self.params_staging_buffer,
+                i as u64 * params_size,
                 bytemuck::bytes_of(&gpu_params),
             );
+        }
 
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("finalize"),
-                });
+        // Single command buffer for ALL work: clear + N×(copy params, iterate, colorize) + finalize + readback
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render"),
+            });
 
+        encoder.clear_buffer(&self.accum_buffer, 0, None);
+
+        for i in 0..samples.len() {
+            // Copy this sample's params from staging to the uniform buffer
+            encoder.copy_buffer_to_buffer(
+                &self.params_staging_buffer,
+                i as u64 * params_size,
+                &self.params_buffer,
+                0,
+                params_size,
+            );
+
+            // Fractal iteration
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("finalize"),
+                    label: Some("iterate"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.finalize_pipeline);
-                pass.set_bind_group(0, &self.finalize_bind_group, &[]);
+                if use_perturb {
+                    pass.set_pipeline(&self.perturb_pipeline);
+                    pass.set_bind_group(0, &self.perturb_bind_group, &[]);
+                } else if params.fractal_type.is_escape_time() {
+                    pass.set_pipeline(&self.escape_pipeline);
+                    pass.set_bind_group(0, &self.escape_bind_group, &[]);
+                } else {
+                    pass.set_pipeline(&self.newton_pipeline);
+                    pass.set_bind_group(0, &self.newton_bind_group, &[]);
+                }
                 pass.dispatch_workgroups(wg_x, wg_y, 1);
             }
 
-            // Copy output buffer -> readback buffer for CPU readback
-            let buf_size = (self.width as u64) * (self.height as u64) * 4;
-            encoder.copy_buffer_to_buffer(
-                &self.output_buffer, 0,
-                &self.readback_buffer, 0,
-                buf_size,
-            );
-
-            self.queue.submit(std::iter::once(encoder.finish()));
+            // Colorize and accumulate
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("accumulate"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.colorize_pipeline);
+                pass.set_bind_group(0, &self.colorize_bind_group, &[]);
+                pass.dispatch_workgroups(wg_x, wg_y, 1);
+            }
         }
 
+        // Finalize: divide accumulated color by weight, pack to RGBA
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("finalize"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.finalize_pipeline);
+            pass.set_bind_group(0, &self.finalize_bind_group, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+        }
+
+        // Copy output buffer -> readback buffer
+        let buf_size = (self.width as u64) * (self.height as u64) * 4;
+        encoder.copy_buffer_to_buffer(
+            &self.output_buffer, 0,
+            &self.readback_buffer, 0,
+            buf_size,
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
         self.device.poll(wgpu::Maintain::Wait);
         self.last_render_ms = start.elapsed().as_secs_f64() * 1000.0;
     }

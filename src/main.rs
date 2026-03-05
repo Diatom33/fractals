@@ -45,7 +45,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                     || ft.name().to_lowercase().replace(' ', "_") == name.to_lowercase()
                 {
                     params.fractal_type = ft;
-                    params.bounds = ft.default_bounds();
+                    params.set_from_default_bounds();
                     break;
                 }
             }
@@ -84,7 +84,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         if let Some(val) = args.get(pos + 1) {
             let parts: Vec<f64> = val.split(',').filter_map(|s| s.parse().ok()).collect();
             if parts.len() == 4 {
-                params.bounds = [parts[0], parts[1], parts[2], parts[3]];
+                params.set_from_bounds([parts[0], parts[1], parts[2], parts[3]]);
             }
         }
     }
@@ -178,7 +178,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     });
 
     // Perturbation resources
-    let pixel_step = (params.bounds[1] - params.bounds[0]) / (width as f64 - 1.0).max(1.0);
+    let pixel_step = params.pixel_step_x(width);
     let use_perturb = params.fractal_type == FractalType::Mandelbrot && pixel_step < 1e-7;
 
     let perturb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -199,16 +199,14 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     });
 
     // Decompose pixel_step into mantissa + exponent for extended-range perturbation
-    let step_y = (params.bounds[3] - params.bounds[2]) / (height as f64 - 1.0).max(1.0);
+    let step_y = params.pixel_step_y(height);
     let ps_exp = pixel_step.log2().floor() as i32;
     let ps_scale = 2.0_f64.powi(ps_exp);
     let ps_mantissa_x = (pixel_step / ps_scale) as f32;
     let ps_mantissa_y = (step_y / ps_scale) as f32;
 
     if use_perturb {
-        let cx = (params.bounds[0] + params.bounds[1]) / 2.0;
-        let cy = (params.bounds[2] + params.bounds[3]) / 2.0;
-        let perturb_data = fractals::compute_reference_orbit(cx, cy, params.max_iter, pixel_step);
+        let perturb_data = fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step);
         queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
         let pgpu = PerturbGpuParams { ref_orbit_len: perturb_data.orbit_len, pixel_step_exp: ps_exp, _pad: [0; 2] };
         queue.write_buffer(&perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));
@@ -357,32 +355,36 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let wg_x = (width + 15) / 16;
     let wg_y = (height + 15) / 16;
 
-    // Mitchell-Netravali reconstruction filter (B=1/3, C=1/3):
-    // negative lobes sharpen edges instead of blurring like Gaussian.
     let samples = fractals::compute_samples(ss);
+    let params_size = std::mem::size_of::<GpuParams>() as u64;
 
-    // Clear accumulation buffer
-    {
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.clear_buffer(&accum_buf, 0, None);
-        queue.submit(std::iter::once(encoder.finish()));
-    }
+    // Staging buffer for batched sample params
+    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: samples.len() as u64 * params_size,
+        usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
-    // Multi-pass: iterate and accumulate for each sub-pixel sample
-    for &(offset_x, offset_y, weight) in &samples {
-        let mut gpu_params = params.to_gpu_params(width, height, width);
+    // Stage all sample params
+    let base_gpu_params = params.to_gpu_params(width, height, width);
+    for (i, &(offset_x, offset_y, weight)) in samples.iter().enumerate() {
+        let mut gpu_params = base_gpu_params;
         gpu_params.sample_offset = [offset_x, offset_y];
         gpu_params.sample_weight = weight;
-
         if use_perturb {
             gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
         }
+        queue.write_buffer(&staging_buf, i as u64 * params_size, bytemuck::bytes_of(&gpu_params));
+    }
 
-        queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&gpu_params));
+    // Single command buffer for all work
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.clear_buffer(&accum_buf, 0, None);
 
-        let mut encoder = device.create_command_encoder(&Default::default());
+    for i in 0..samples.len() {
+        encoder.copy_buffer_to_buffer(&staging_buf, i as u64 * params_size, &params_buf, 0, params_size);
 
-        // Fractal iteration
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             if use_perturb {
@@ -398,36 +400,23 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
-        // Colorize and accumulate
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&col_pipe);
             pass.set_bind_group(0, &col_bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
-
-        queue.submit(std::iter::once(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
     }
 
-    // Finalize: divide by weight, pack to RGBA, copy to readback
+    // Finalize + readback
     {
-        let gpu_params = params.to_gpu_params(width, height, width);
-        queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&gpu_params));
-
-        let mut encoder = device.create_command_encoder(&Default::default());
-
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&fin_pipe);
-            pass.set_bind_group(0, &fin_bg, &[]);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
-        }
-
-        encoder.copy_buffer_to_buffer(&out_buf, 0, &readback_buf, 0, out_pixels * 4);
-        queue.submit(std::iter::once(encoder.finish()));
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&fin_pipe);
+        pass.set_bind_group(0, &fin_bg, &[]);
+        pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
-
+    encoder.copy_buffer_to_buffer(&out_buf, 0, &readback_buf, 0, out_pixels * 4);
+    queue.submit(std::iter::once(encoder.finish()));
     device.poll(wgpu::Maintain::Wait);
 
     let slice = readback_buf.slice(..);

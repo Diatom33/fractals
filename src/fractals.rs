@@ -1,5 +1,7 @@
 /// Fractal type definitions, parameters, and defaults.
 
+use rug::{Assign, Float};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FractalType {
     Mandelbrot,
@@ -130,10 +132,16 @@ pub struct Controls {
 }
 
 /// All parameters needed to render any fractal type.
+/// View is represented as center (arbitrary-precision via rug) + half-range (f64).
+/// This allows deep zoom to 1e-300+ since the center maintains full precision
+/// and half_range only needs relative accuracy.
 #[derive(Debug, Clone)]
 pub struct FractalParams {
     pub fractal_type: FractalType,
-    pub bounds: [f64; 4], // x_min, x_max, y_min, y_max (f64 for zoom precision)
+    pub center_re: Float,     // arbitrary precision center (real)
+    pub center_im: Float,     // arbitrary precision center (imaginary)
+    pub half_range_x: f64,    // half the x extent in complex units
+    pub half_range_y: f64,    // half the y extent in complex units
     pub max_iter: u32,
     pub julia_c: [f32; 2],   // [re, im]
     pub power: f32,           // Multibrot exponent
@@ -144,9 +152,13 @@ pub struct FractalParams {
 
 impl Default for FractalParams {
     fn default() -> Self {
+        let b = FractalType::Mandelbrot.default_bounds();
         Self {
             fractal_type: FractalType::Mandelbrot,
-            bounds: FractalType::Mandelbrot.default_bounds(),
+            center_re: Float::with_val(128, (b[0] + b[1]) / 2.0),
+            center_im: Float::with_val(128, (b[2] + b[3]) / 2.0),
+            half_range_x: (b[1] - b[0]) / 2.0,
+            half_range_y: (b[3] - b[2]) / 2.0,
             max_iter: 100,
             julia_c: [-0.7, 0.27015],
             power: 2.0,
@@ -158,8 +170,61 @@ impl Default for FractalParams {
 }
 
 impl FractalParams {
+    /// Derive f64 bounds for display and legacy compatibility.
+    pub fn bounds_f64(&self) -> [f64; 4] {
+        let cx = self.center_re.to_f64();
+        let cy = self.center_im.to_f64();
+        [cx - self.half_range_x, cx + self.half_range_x,
+         cy - self.half_range_y, cy + self.half_range_y]
+    }
+
+    /// Pixel step (complex units per pixel) for X axis.
+    pub fn pixel_step_x(&self, display_w: u32) -> f64 {
+        (2.0 * self.half_range_x) / (display_w as f64 - 1.0).max(1.0)
+    }
+
+    /// Pixel step (complex units per pixel) for Y axis.
+    pub fn pixel_step_y(&self, display_h: u32) -> f64 {
+        (2.0 * self.half_range_y) / (display_h as f64 - 1.0).max(1.0)
+    }
+
+    /// Ensure rug center precision is sufficient for current zoom depth.
+    pub fn ensure_precision(&mut self) {
+        let prec = self.required_precision();
+        if self.center_re.prec() < prec {
+            self.center_re = Float::with_val(prec, &self.center_re);
+            self.center_im = Float::with_val(prec, &self.center_im);
+        }
+    }
+
+    /// Required rug precision in bits for current zoom depth.
+    fn required_precision(&self) -> u32 {
+        let zoom_digits = if self.half_range_x > 0.0 {
+            (-self.half_range_x.log10()).max(16.0) as u32
+        } else {
+            64
+        };
+        (zoom_digits * 4 + 64).max(128)
+    }
+
+    /// Reset center and range from default bounds for current fractal type.
+    pub fn set_from_default_bounds(&mut self) {
+        let b = self.fractal_type.default_bounds();
+        self.center_re = Float::with_val(128, (b[0] + b[1]) / 2.0);
+        self.center_im = Float::with_val(128, (b[2] + b[3]) / 2.0);
+        self.half_range_x = (b[1] - b[0]) / 2.0;
+        self.half_range_y = (b[3] - b[2]) / 2.0;
+    }
+
+    /// Set center and range from explicit bounds (for CLI --bounds).
+    pub fn set_from_bounds(&mut self, bounds: [f64; 4]) {
+        self.center_re = Float::with_val(128, (bounds[0] + bounds[1]) / 2.0);
+        self.center_im = Float::with_val(128, (bounds[2] + bounds[3]) / 2.0);
+        self.half_range_x = (bounds[1] - bounds[0]) / 2.0;
+        self.half_range_y = (bounds[3] - bounds[2]) / 2.0;
+    }
+
     /// Compute the nth roots of unity for z^n - 1 (Newton/Nova coloring).
-    /// Returns Vec of [re, im] pairs.
     pub fn compute_roots(&self) -> Vec<[f32; 2]> {
         let n = self.poly_degree as usize;
         (0..n)
@@ -171,19 +236,18 @@ impl FractalParams {
     }
 
     /// Build the GPU uniform data (must match Params struct in WGSL).
-    /// Computes center (split into hi/lo f32 pair for double-single precision)
-    /// and pixel_step from the f64 bounds.
+    /// Uses rug center for Dekker splitting (f32 hi + f32 lo).
     pub fn to_gpu_params(&self, display_w: u32, display_h: u32, stride: u32) -> GpuParams {
-        let cx = (self.bounds[0] + self.bounds[1]) / 2.0;
-        let cy = (self.bounds[2] + self.bounds[3]) / 2.0;
-        let step_x = (self.bounds[1] - self.bounds[0]) / (display_w as f64 - 1.0).max(1.0);
-        let step_y = (self.bounds[3] - self.bounds[2]) / (display_h as f64 - 1.0).max(1.0);
+        let cx_f64 = self.center_re.to_f64();
+        let cy_f64 = self.center_im.to_f64();
+        let step_x = self.pixel_step_x(display_w);
+        let step_y = self.pixel_step_y(display_h);
 
         // Split f64 center into f32 hi + f32 lo (Dekker splitting)
-        let cx_hi = cx as f32;
-        let cx_lo = (cx - cx_hi as f64) as f32;
-        let cy_hi = cy as f32;
-        let cy_lo = (cy - cy_hi as f64) as f32;
+        let cx_hi = cx_f64 as f32;
+        let cx_lo = (cx_f64 - cx_hi as f64) as f32;
+        let cy_hi = cy_f64 as f32;
+        let cy_lo = (cy_f64 - cy_hi as f64) as f32;
 
         GpuParams {
             center_hi: [cx_hi, cy_hi],
@@ -211,10 +275,10 @@ impl FractalParams {
 /// Pre-compute sub-pixel sample positions and weights for anti-aliasing.
 /// Returns (offset_x, offset_y, weight) tuples in pixel units.
 ///
-/// Uses a uniform grid within the pixel footprint [-0.5, +0.5] with equal
-/// weights (box filter SSAA). Fractals have infinite bandwidth so
-/// reconstruction filters like Mitchell just add blur — simple averaging
-/// of sub-pixel samples gives clean AA without softening.
+/// Uses jittered stratified sampling within [-0.5, +0.5]: each grid cell
+/// gets a random offset instead of using the cell center. This breaks
+/// moire patterns and converts structured aliasing into less visible noise.
+/// Equal weights (box filter). Jitter is deterministic (seeded hash).
 ///
 /// Quality levels:
 ///   ss=1: Off (1 sample at center)
@@ -225,22 +289,33 @@ pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
         return vec![(0.0, 0.0, 1.0)];
     }
 
-    // Grid density within [-0.5, +0.5] pixel footprint
     let grid_n: u32 = match ss {
-        2 => 4,  // 4x4 = 16 samples
-        _ => 8,  // 8x8 = 64 samples
+        2 => 4,
+        _ => 8,
     };
 
     let mut samples = Vec::with_capacity((grid_n * grid_n) as usize);
     for sy in 0..grid_n {
         for sx in 0..grid_n {
-            // Stratified grid: center of each sub-pixel cell
-            let offset_x = -0.5 + (sx as f32 + 0.5) / grid_n as f32;
-            let offset_y = -0.5 + (sy as f32 + 0.5) / grid_n as f32;
+            // Deterministic jitter via simple hash
+            let seed = sx * 7919 + sy * 104729 + 31;
+            let jx = hash_to_float(seed);
+            let jy = hash_to_float(seed ^ 0x9E3779B9);
+            let offset_x = -0.5 + (sx as f32 + jx) / grid_n as f32;
+            let offset_y = -0.5 + (sy as f32 + jy) / grid_n as f32;
             samples.push((offset_x, offset_y, 1.0));
         }
     }
     samples
+}
+
+/// Simple deterministic hash → float in [0, 1).
+fn hash_to_float(mut x: u32) -> f32 {
+    x = x.wrapping_mul(0x45D9F3B);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x45D9F3B);
+    x ^= x >> 16;
+    (x & 0x00FF_FFFF) as f32 / 16777216.0
 }
 
 /// Perturbation-specific GPU uniform. Must match PerturbParams in escape_perturb.wgsl.
@@ -262,52 +337,54 @@ pub struct PerturbData {
 }
 
 /// Compute a reference orbit at arbitrary precision using rug (GMP/MPFR).
-/// center_re, center_im are f64 view center; precision_bits scales with zoom depth.
+/// Uses in-place operations to avoid heap allocations in the hot loop.
 pub fn compute_reference_orbit(
-    center_re: f64,
-    center_im: f64,
+    center_re: &Float,
+    center_im: &Float,
     max_iter: u32,
     pixel_step: f64,
 ) -> PerturbData {
-    use rug::Float;
-
     // Precision: ~3.32 bits per decimal digit of zoom depth, plus safety margin
     let zoom_digits = if pixel_step > 0.0 {
         (-pixel_step.log10()).max(16.0) as u32
     } else {
         64
     };
-    let precision = (zoom_digits * 4 + 64).max(128);
+    let precision = (zoom_digits * 4 + 64).max(128).max(center_re.prec());
 
     let c_re = Float::with_val(precision, center_re);
     let c_im = Float::with_val(precision, center_im);
     let mut z_re = Float::with_val(precision, 0.0);
     let mut z_im = Float::with_val(precision, 0.0);
 
+    // Scratch variables reused every iteration (no allocations in hot loop)
+    let mut zr2 = Float::new(precision);
+    let mut zi2 = Float::new(precision);
+    let mut zri = Float::new(precision);
+
     let mut orbit = Vec::with_capacity(max_iter as usize + 1);
     let escape_r2 = 256.0_f64;
 
     for _ in 0..max_iter {
-        // Store Z_n as f32 for GPU
-        let zr_f32 = z_re.to_f32();
-        let zi_f32 = z_im.to_f32();
-        orbit.push([zr_f32, zi_f32]);
+        orbit.push([z_re.to_f32(), z_im.to_f32()]);
 
-        // z = z^2 + c at arbitrary precision
-        let zr2 = Float::with_val(precision, &z_re * &z_re);
-        let zi2 = Float::with_val(precision, &z_im * &z_im);
-        let zri = Float::with_val(precision, &z_re * &z_im);
+        // z = z^2 + c using in-place ops (no heap allocs)
+        zr2.assign(z_re.square_ref());       // zr2 = z_re^2
+        zi2.assign(z_im.square_ref());       // zi2 = z_im^2
+        zri.assign(&z_re * &z_im);          // zri = z_re * z_im
 
-        z_re = Float::with_val(precision, &zr2 - &zi2) + &c_re;
-        z_im = Float::with_val(precision, &zri * 2u32) + &c_im;
+        z_re.assign(&zr2 - &zi2);           // z_re = zr2 - zi2
+        z_re += &c_re;                       // z_re += c_re
 
-        // Escape check
-        let mag2: f64 = (Float::with_val(precision, &z_re * &z_re)
-            + Float::with_val(precision, &z_im * &z_im))
-        .to_f64();
-        if mag2 > escape_r2 {
-            // Store the escaping Z value too (needed for smooth coloring)
-            orbit.push([z_re.to_f32(), z_im.to_f32()]);
+        z_im.assign(&zri << 1u32);           // z_im = 2 * zri
+        z_im += &c_im;                       // z_im += c_im
+
+        // Escape check using f64 (avoids 2 arb-prec multiplications;
+        // f64 is more than sufficient for checking |z|^2 > 256)
+        let zr = z_re.to_f64();
+        let zi = z_im.to_f64();
+        if zr * zr + zi * zi > escape_r2 {
+            orbit.push([zr as f32, zi as f32]);
             break;
         }
     }

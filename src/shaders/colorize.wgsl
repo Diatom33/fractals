@@ -2,6 +2,7 @@
 // Reads iteration data + final z, produces weighted color into accumulation buffer.
 // Supports both escape-time and root-basin coloring.
 // Called once per sub-pixel sample; accumulates into a vec4<f32> buffer (rgb + weight).
+// Both color modes use color-domain averaging: compute RGB per sample, accumulate weighted.
 
 struct Params {
     center_hi: vec2<f32>,
@@ -93,20 +94,9 @@ fn basin_color(smooth_iter: f32, z: vec2<f32>, max_iter: f32, n_roots: u32) -> v
     return hsv_to_rgb(hue, sat, shade);
 }
 
-// -- Colorize a single sample -------------------------------------------------
-
-fn colorize_sample(smooth_iter: f32, z: vec2<f32>, max_iter: f32) -> vec3<f32> {
-    if params.color_mode == 0u {
-        return escape_color(smooth_iter, max_iter);
-    } else {
-        return basin_color(smooth_iter, z, max_iter, params.num_roots);
-    }
-}
-
 // -- Main ---------------------------------------------------------------------
-// Dispatch covers the OUTPUT resolution (width, height).
-// Each invocation colorizes one sample and accumulates (adds) the weighted
-// color into the accum buffer. The finalize shader divides by total weight.
+// Both color modes: compute RGB color per sample, accumulate weighted into accum buffer.
+// accum.xyz = sum of weighted RGB, accum.w = sum of weights.
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -123,18 +113,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let wt = params.sample_weight;
     let prev = accum[idx];
 
+    var color: vec3<f32>;
     if params.color_mode == 0u {
-        // Escape-time: accumulate raw iteration data instead of colors.
-        // accum = (sum_smooth_iter_weighted, escaped_weight, total_weight, 0)
-        if smooth_iter < max_iter {
-            accum[idx] = prev + vec4<f32>(smooth_iter * wt, wt, wt, 0.0);
-        } else {
-            accum[idx] = prev + vec4<f32>(0.0, 0.0, wt, 0.0);
-        }
+        color = escape_color(smooth_iter, max_iter);
     } else {
-        // Basin coloring: accumulate weighted color as before.
-        // accum.xyz = sum of weighted RGB, accum.w = sum of weights
-        let color = basin_color(smooth_iter, z, max_iter, params.num_roots);
-        accum[idx] = prev + vec4<f32>(color * wt, wt);
+        color = basin_color(smooth_iter, z, max_iter, params.num_roots);
     }
+
+    accum[idx] = prev + vec4<f32>(color * wt, wt);
 }

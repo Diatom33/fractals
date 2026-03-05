@@ -2,20 +2,53 @@
 
 use crate::fractals::{FractalParams, FractalType};
 use crate::gpu::GpuState;
+use rug::Float;
+
+/// Saved view state for undo history and drag operations.
+#[derive(Clone)]
+struct ViewState {
+    center_re: Float,
+    center_im: Float,
+    half_range_x: f64,
+    half_range_y: f64,
+}
+
+impl ViewState {
+    fn from_params(p: &FractalParams) -> Self {
+        ViewState {
+            center_re: p.center_re.clone(),
+            center_im: p.center_im.clone(),
+            half_range_x: p.half_range_x,
+            half_range_y: p.half_range_y,
+        }
+    }
+
+    fn apply_to(&self, p: &mut FractalParams) {
+        p.center_re = self.center_re.clone();
+        p.center_im = self.center_im.clone();
+        p.half_range_x = self.half_range_x;
+        p.half_range_y = self.half_range_y;
+    }
+}
 
 pub struct FractalApp {
     gpu: Option<GpuState>,
     params: FractalParams,
     prev_params_hash: u64,
-    history: Vec<[f64; 4]>, // bounds history for undo
+    history: Vec<ViewState>,
     needs_render: bool,
 
     // egui-managed texture (CPU readback from GPU)
     texture_handle: Option<egui::TextureHandle>,
 
-    // Drag state
+    // Drag state: offset texture visually during drag, render on release
     drag_start: Option<egui::Pos2>,
-    drag_bounds: Option<[f64; 4]>,
+    drag_view: Option<ViewState>,
+    drag_pixel_offset: egui::Vec2,
+
+    // Interactive rendering: SS=1 during rapid input, full SS after idle
+    pending_quality_render: bool,
+    last_input_time: std::time::Instant,
 
     // Export
     export_path: String,
@@ -56,7 +89,10 @@ impl FractalApp {
             needs_render: true,
             texture_handle: None,
             drag_start: None,
-            drag_bounds: None,
+            drag_view: None,
+            drag_pixel_offset: egui::Vec2::ZERO,
+            pending_quality_render: false,
+            last_input_time: std::time::Instant::now(),
             export_path: String::from("fractal.png"),
             export_msg: String::new(),
             export_msg_is_error: false,
@@ -66,74 +102,54 @@ impl FractalApp {
         }
     }
 
-    /// Adjust bounds so that the scale (units per pixel) is equal in x and y,
+    /// Adjust half_range so that the scale (units per pixel) is equal in x and y,
     /// keeping the center of the view fixed. The larger scale wins so nothing
     /// gets cropped — the smaller dimension is expanded to match.
-    /// Only for user-initiated changes (type switch, reset, undo) where we
-    /// need to establish a correct aspect ratio from scratch.
     fn correct_aspect_ratio(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        let [x_min, x_max, y_min, y_max] = self.params.bounds;
-        let cx = (x_min + x_max) * 0.5;
-        let cy = (y_min + y_max) * 0.5;
-
-        let x_range = x_max - x_min;
-        let y_range = y_max - y_min;
-
-        let scale_x = x_range / width as f64;
-        let scale_y = y_range / height as f64;
-
-        // Use the larger scale so the view expands rather than crops
+        let scale_x = (2.0 * self.params.half_range_x) / width as f64;
+        let scale_y = (2.0 * self.params.half_range_y) / height as f64;
         let scale = scale_x.max(scale_y);
 
-        let new_x_range = scale * width as f64;
-        let new_y_range = scale * height as f64;
-
-        self.params.bounds = [
-            cx - new_x_range * 0.5,
-            cx + new_x_range * 0.5,
-            cy - new_y_range * 0.5,
-            cy + new_y_range * 0.5,
-        ];
+        self.params.half_range_x = scale * width as f64 / 2.0;
+        self.params.half_range_y = scale * height as f64 / 2.0;
 
         self.last_display_w = width;
         self.last_display_h = height;
     }
 
-    /// Scale bounds proportionally when the display/GPU dimensions change.
-    /// Preserves center and per-pixel scale in each axis independently.
-    /// Unlike correct_aspect_ratio, this never uses max() so it can't ratchet.
+    /// Scale half_range proportionally when the display dimensions change.
     fn scale_bounds_to_new_size(&mut self, new_w: u32, new_h: u32) {
         if self.last_display_w == 0 || self.last_display_h == 0 || new_w == 0 || new_h == 0 {
             return;
         }
-        let [x_min, x_max, y_min, y_max] = self.params.bounds;
-        let cx = (x_min + x_max) * 0.5;
-        let cy = (y_min + y_max) * 0.5;
-
-        let x_range = (x_max - x_min) * new_w as f64 / self.last_display_w as f64;
-        let y_range = (y_max - y_min) * new_h as f64 / self.last_display_h as f64;
-
-        self.params.bounds = [
-            cx - x_range * 0.5,
-            cx + x_range * 0.5,
-            cy - y_range * 0.5,
-            cy + y_range * 0.5,
-        ];
+        self.params.half_range_x *= new_w as f64 / self.last_display_w as f64;
+        self.params.half_range_y *= new_h as f64 / self.last_display_h as f64;
 
         self.last_display_w = new_w;
         self.last_display_h = new_h;
     }
 
+    fn push_history(&mut self) {
+        self.history.push(ViewState::from_params(&self.params));
+    }
+
+    /// Mark that we're in an interactive operation — render at SS=1 now,
+    /// schedule full-quality re-render after input settles.
+    fn mark_interactive(&mut self) {
+        if self.params.supersampling > 1 {
+            self.pending_quality_render = true;
+            self.last_input_time = std::time::Instant::now();
+        }
+    }
+
     fn params_hash(&self) -> u64 {
-        let (dw, h, stride, ss) = self.gpu.as_ref().map_or((960, 720, 960, 1), |g| {
-            (g.display_width, g.height, g.width, g.supersampling)
+        let (dw, h, stride) = self.gpu.as_ref().map_or((960, 720, 960), |g| {
+            (g.display_width, g.height, g.width)
         });
         let binding = self.params.to_gpu_params(dw, h, stride);
-        // XOR in supersampling so SS changes trigger re-render
-        let ss_extra = (ss as u64) << 48;
         let bytes = bytemuck::bytes_of(&binding);
         let mut hash = 0u64;
         for chunk in bytes.chunks(8) {
@@ -141,7 +157,7 @@ impl FractalApp {
             arr[..chunk.len()].copy_from_slice(chunk);
             hash ^= u64::from_le_bytes(arr);
         }
-        hash ^ ss_extra
+        hash
     }
 }
 
@@ -198,7 +214,7 @@ impl eframe::App for FractalApp {
                                 }
                             });
                         if self.params.fractal_type != prev_type {
-                            self.params.bounds = self.params.fractal_type.default_bounds();
+                            self.params.set_from_default_bounds();
                             self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                             self.history.clear();
                             self.needs_render = true;
@@ -321,7 +337,7 @@ impl eframe::App for FractalApp {
 
                         ui.horizontal(|ui| {
                             if ui.button("Reset View").clicked() {
-                                self.params.bounds = self.params.fractal_type.default_bounds();
+                                self.params.set_from_default_bounds();
                                 self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                                 self.history.clear();
                                 self.needs_render = true;
@@ -332,7 +348,7 @@ impl eframe::App for FractalApp {
                                 .clicked()
                             {
                                 if let Some(prev) = self.history.pop() {
-                                    self.params.bounds = prev;
+                                    prev.apply_to(&mut self.params);
                                     self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                                     self.needs_render = true;
                                 }
@@ -347,7 +363,7 @@ impl eframe::App for FractalApp {
                         );
 
                         // Show current view bounds
-                        let [x_min, x_max, y_min, y_max] = self.params.bounds;
+                        let [x_min, x_max, y_min, y_max] = self.params.bounds_f64();
                         ui.add_space(2.0);
                         ui.label(
                             egui::RichText::new(format!(
@@ -422,8 +438,13 @@ impl eframe::App for FractalApp {
                         );
                         ui.separator();
                         ui.monospace(format!("{}x{}", gpu.display_width, gpu.height));
-                        if gpu.supersampling > 1 {
-                            ui.monospace(format!("{}x SS", gpu.supersampling));
+                        if self.params.supersampling > 1 {
+                            let ss_label = if self.pending_quality_render {
+                                format!("{}x SS*", self.params.supersampling)
+                            } else {
+                                format!("{}x SS", self.params.supersampling)
+                            };
+                            ui.monospace(ss_label);
                         }
                         ui.separator();
                         ui.monospace(format!("{:.1} ms", gpu.last_render_ms));
@@ -434,8 +455,7 @@ impl eframe::App for FractalApp {
                             egui::RichText::new(format!("{} iters", self.params.max_iter)).weak(),
                         );
                         ui.separator();
-                        let [xn, xx, _yn, _yx] = self.params.bounds;
-                        let pixel_step = (xx - xn) / gpu.display_width as f64;
+                        let pixel_step = self.params.pixel_step_x(gpu.display_width);
                         let zoom_exp = -(pixel_step.log10().floor() as i32);
                         ui.monospace(
                             egui::RichText::new(format!("1e-{}", zoom_exp)).weak(),
@@ -444,14 +464,6 @@ impl eframe::App for FractalApp {
                             ui.monospace(
                                 egui::RichText::new("PERTURB")
                                     .color(egui::Color32::from_rgb(255, 200, 100)),
-                            );
-                        }
-                        let center_mag = xn.abs().max(xx.abs()).max(1e-10);
-                        let min_range = center_mag * 2e-14;
-                        if (xx - xn) < min_range * 5.0 {
-                            ui.monospace(
-                                egui::RichText::new("PRECISION LIMIT")
-                                    .color(egui::Color32::from_rgb(255, 100, 100)),
                             );
                         }
                     } else {
@@ -472,26 +484,32 @@ impl eframe::App for FractalApp {
                 // Resize GPU buffers/texture if needed
                 let mut new_display_dims: Option<(u32, u32)> = None;
                 if let Some(gpu) = &mut self.gpu {
-                    let ss = self.params.supersampling;
                     let size_changed = gpu.display_width != display_w || gpu.height != display_h;
 
-                    if size_changed || gpu.supersampling != ss {
-                        gpu.resize(display_w, display_h, ss);
-                        self.needs_render = true;
-                    }
                     if size_changed {
+                        gpu.resize(display_w, display_h);
+                        self.needs_render = true;
                         new_display_dims = Some((gpu.display_width, gpu.height));
                     }
                 }
                 if let Some((new_w, new_h)) = new_display_dims {
                     if self.last_display_w > 0 {
-                        // Window resize: scale bounds proportionally to display dimensions.
-                        // No max() → no ratchet from sub-pixel display jitter.
                         self.scale_bounds_to_new_size(new_w, new_h);
                     } else {
-                        // First frame: establish correct aspect ratio from scratch
                         self.correct_aspect_ratio(new_w, new_h);
                     }
+                }
+
+                // Schedule deferred quality render after interaction settles
+                if self.pending_quality_render
+                    && self.last_input_time.elapsed()
+                        > std::time::Duration::from_millis(150)
+                {
+                    self.pending_quality_render = false;
+                    self.needs_render = true;
+                }
+                if self.pending_quality_render {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(150));
                 }
 
                 // Render if needed (params changed or flagged)
@@ -499,7 +517,13 @@ impl eframe::App for FractalApp {
                 let did_render = self.needs_render || hash != self.prev_params_hash;
                 if did_render {
                     if let Some(gpu) = &mut self.gpu {
-                        gpu.render(&self.params);
+                        // Use SS=1 during interactive operations for responsiveness
+                        let render_ss = if self.pending_quality_render {
+                            1
+                        } else {
+                            self.params.supersampling
+                        };
+                        gpu.render(&self.params, render_ss);
                     }
                     self.prev_params_hash = self.params_hash();
                     self.needs_render = false;
@@ -533,9 +557,11 @@ impl eframe::App for FractalApp {
                         ui.allocate_painter(size, egui::Sense::click_and_drag());
                     let rect = response.rect;
 
+                    // Offset texture during drag for instant visual feedback
+                    let draw_rect = rect.translate(self.drag_pixel_offset);
                     ui.painter().image(
                         handle.id(),
-                        rect,
+                        draw_rect,
                         egui::Rect::from_min_max(
                             egui::pos2(0.0, 0.0),
                             egui::pos2(1.0, 1.0),
@@ -543,15 +569,16 @@ impl eframe::App for FractalApp {
                         egui::Color32::WHITE,
                     );
 
-                    // Update cursor complex coordinates for side panel display
+                    // Update cursor complex coordinates
                     if let Some(pos) = response.hover_pos() {
                         let frac_x =
                             ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0) as f64;
                         let frac_y =
                             ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0) as f64;
-                        let [bx_min, bx_max, by_min, by_max] = self.params.bounds;
-                        let cx = bx_min + frac_x * (bx_max - bx_min);
-                        let cy = by_min + frac_y * (by_max - by_min);
+                        let cx = self.params.center_re.to_f64()
+                            + (frac_x - 0.5) * 2.0 * self.params.half_range_x;
+                        let cy = self.params.center_im.to_f64()
+                            + (frac_y - 0.5) * 2.0 * self.params.half_range_y;
                         self.cursor_complex = Some((cx, cy));
                     } else {
                         self.cursor_complex = None;
@@ -571,8 +598,6 @@ impl FractalApp {
         response: &egui::Response,
         rect: egui::Rect,
     ) {
-        let [x_min, x_max, y_min, y_max] = self.params.bounds;
-
         // ── Scroll zoom toward cursor ─────────────────────────────────
         if response.hovered() {
             let scroll = ctx.input(|i| i.raw_scroll_delta.y);
@@ -580,71 +605,81 @@ impl FractalApp {
                 if let Some(pos) = response.hover_pos() {
                     let frac_x = ((pos.x - rect.min.x) / rect.width()) as f64;
                     let frac_y = ((pos.y - rect.min.y) / rect.height()) as f64;
-                    let cx = x_min + frac_x * (x_max - x_min);
-                    let cy = y_min + frac_y * (y_max - y_min);
 
                     let factor: f64 = if scroll > 0.0 { 0.85 } else { 1.0 / 0.85 };
-                    let x_range = x_max - x_min;
-                    let center_mag = x_min.abs().max(x_max.abs()).max(1e-10);
-                    let min_range = center_mag * 2e-14;
-                    if x_range * factor < min_range && factor < 1.0 {
-                        // At f64 precision floor — don't zoom further
-                    } else {
-                        self.history.push(self.params.bounds);
-                        self.params.bounds = [
-                            cx - (cx - x_min) * factor,
-                            cx + (x_max - cx) * factor,
-                            cy - (cy - y_min) * factor,
-                            cy + (y_max - cy) * factor,
-                        ];
-                        self.needs_render = true;
-                    }
-                }
-            }
-        }
 
-        // ── Drag to pan ───────────────────────────────────────────────
-        if response.drag_started() {
-            self.drag_start = response.interact_pointer_pos();
-            self.drag_bounds = Some(self.params.bounds);
-        }
-        if response.dragged() {
-            if let (Some(start), Some(orig_bounds)) = (self.drag_start, self.drag_bounds) {
-                if let Some(current) = response.interact_pointer_pos() {
-                    let dx_px = (current.x - start.x) as f64;
-                    let dy_px = (current.y - start.y) as f64;
-                    let dx = -dx_px / rect.width() as f64 * (orig_bounds[1] - orig_bounds[0]);
-                    let dy = -dy_px / rect.height() as f64 * (orig_bounds[3] - orig_bounds[2]);
-                    self.params.bounds = [
-                        orig_bounds[0] + dx,
-                        orig_bounds[1] + dx,
-                        orig_bounds[2] + dy,
-                        orig_bounds[3] + dy,
-                    ];
+                    self.push_history();
+                    self.params.ensure_precision();
+
+                    let offset_re = (frac_x - 0.5) * 2.0 * self.params.half_range_x;
+                    let offset_im = (frac_y - 0.5) * 2.0 * self.params.half_range_y;
+
+                    let shift_re = Float::with_val(
+                        self.params.center_re.prec(),
+                        offset_re * (1.0 - factor),
+                    );
+                    let shift_im = Float::with_val(
+                        self.params.center_im.prec(),
+                        offset_im * (1.0 - factor),
+                    );
+                    self.params.center_re += shift_re;
+                    self.params.center_im += shift_im;
+                    self.params.half_range_x *= factor;
+                    self.params.half_range_y *= factor;
+                    self.mark_interactive();
                     self.needs_render = true;
                 }
             }
         }
+
+        // ── Drag to pan (deferred: offset texture visually, render on release) ──
+        if response.drag_started() {
+            self.drag_start = response.interact_pointer_pos();
+            self.drag_view = Some(ViewState::from_params(&self.params));
+        }
+        if response.dragged() {
+            if let Some(start) = self.drag_start {
+                if let Some(current) = response.interact_pointer_pos() {
+                    self.drag_pixel_offset =
+                        egui::vec2(current.x - start.x, current.y - start.y);
+                    // No render — just visual offset of existing texture
+                }
+            }
+        }
         if response.drag_stopped() {
-            if let Some(orig) = self.drag_bounds.take() {
-                if orig != self.params.bounds {
+            if let Some(orig) = self.drag_view.take() {
+                let dx_px = self.drag_pixel_offset.x as f64;
+                let dy_px = self.drag_pixel_offset.y as f64;
+                if dx_px != 0.0 || dy_px != 0.0 {
+                    let dx = -dx_px / rect.width() as f64 * (2.0 * orig.half_range_x);
+                    let dy = -dy_px / rect.height() as f64 * (2.0 * orig.half_range_y);
+                    self.params.ensure_precision();
+                    self.params.center_re = Float::with_val(
+                        orig.center_re.prec(),
+                        &orig.center_re + dx,
+                    );
+                    self.params.center_im = Float::with_val(
+                        orig.center_im.prec(),
+                        &orig.center_im + dy,
+                    );
                     self.history.push(orig);
+                    self.mark_interactive();
+                    self.needs_render = true;
                 }
             }
             self.drag_start = None;
+            self.drag_pixel_offset = egui::Vec2::ZERO;
         }
 
         // ── Double-click to reset ─────────────────────────────────────
         if response.double_clicked() {
-            self.params.bounds = self.params.fractal_type.default_bounds();
+            self.params.set_from_default_bounds();
             self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
             self.history.clear();
             self.needs_render = true;
         }
 
         // ── Keyboard shortcuts ────────────────────────────────────────
-        // Only process when no text edit widget has focus. We check if
-        // something else has focus that is not our image response.
         let any_text_focused =
             ctx.memory(|m| m.focused()).is_some() && !response.has_focus();
 
@@ -665,14 +700,14 @@ impl FractalApp {
                 });
 
             if r_pressed {
-                self.params.bounds = self.params.fractal_type.default_bounds();
+                self.params.set_from_default_bounds();
                 self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                 self.history.clear();
                 self.needs_render = true;
             }
             if backspace_pressed {
                 if let Some(prev) = self.history.pop() {
-                    self.params.bounds = prev;
+                    prev.apply_to(&mut self.params);
                     self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
                     self.needs_render = true;
                 }
@@ -680,50 +715,53 @@ impl FractalApp {
 
             // Arrow key panning (10% of view per press)
             let pan_frac: f64 = 0.1;
-            let dx = (x_max - x_min) * pan_frac;
-            let dy = (y_max - y_min) * pan_frac;
             if left || right || up || down {
-                self.history.push(self.params.bounds);
+                self.push_history();
+                self.params.ensure_precision();
+                self.mark_interactive();
             }
             if left {
-                self.params.bounds[0] -= dx;
-                self.params.bounds[1] -= dx;
+                let dx = Float::with_val(
+                    self.params.center_re.prec(),
+                    -2.0 * self.params.half_range_x * pan_frac,
+                );
+                self.params.center_re += dx;
                 self.needs_render = true;
             }
             if right {
-                self.params.bounds[0] += dx;
-                self.params.bounds[1] += dx;
+                let dx = Float::with_val(
+                    self.params.center_re.prec(),
+                    2.0 * self.params.half_range_x * pan_frac,
+                );
+                self.params.center_re += dx;
                 self.needs_render = true;
             }
             if up {
-                self.params.bounds[2] -= dy;
-                self.params.bounds[3] -= dy;
+                let dy = Float::with_val(
+                    self.params.center_im.prec(),
+                    -2.0 * self.params.half_range_y * pan_frac,
+                );
+                self.params.center_im += dy;
                 self.needs_render = true;
             }
             if down {
-                self.params.bounds[2] += dy;
-                self.params.bounds[3] += dy;
+                let dy = Float::with_val(
+                    self.params.center_im.prec(),
+                    2.0 * self.params.half_range_y * pan_frac,
+                );
+                self.params.center_im += dy;
                 self.needs_render = true;
             }
 
             // +/- keyboard zoom (centered)
             if plus || minus {
                 let factor: f64 = if plus { 0.85 } else { 1.0 / 0.85 };
-                let cx = (x_min + x_max) * 0.5;
-                let cy = (y_min + y_max) * 0.5;
-                let x_range = x_max - x_min;
-                let center_mag = x_min.abs().max(x_max.abs()).max(1e-10);
-                let min_range = center_mag * 2e-14;
-                if !(x_range * factor < min_range && factor < 1.0) {
-                    self.history.push(self.params.bounds);
-                    self.params.bounds = [
-                        cx - (cx - x_min) * factor,
-                        cx + (x_max - cx) * factor,
-                        cy - (cy - y_min) * factor,
-                        cy + (y_max - cy) * factor,
-                    ];
-                    self.needs_render = true;
-                }
+                self.push_history();
+                self.params.half_range_x *= factor;
+                self.params.half_range_y *= factor;
+                self.params.ensure_precision();
+                self.mark_interactive();
+                self.needs_render = true;
             }
         }
 
