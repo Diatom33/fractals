@@ -85,15 +85,50 @@ fn cpow_int(z_in: vec2<f32>, n: u32) -> vec2<f32> {
     return result;
 }
 
-// Evaluate f(z) and f'(z) together, sharing the z^(n-1) computation.
+// Evaluate f(z) and f'(z) together with inlined paths for common degrees.
 // f(z) = z^n - 1, f'(z) = n * z^(n-1)
 // Returns [f(z), f'(z)].
 fn f_and_fp(z: vec2<f32>, n: u32) -> array<vec2<f32>, 2> {
-    let zn1 = cpow_int(z, n - 1u);          // z^(n-1): one cpow_int call
-    let zn = cmul(zn1, z);                   // z^n = z^(n-1) * z: one cmul
-    let fz = zn - vec2<f32>(1.0, 0.0);
-    let fpz = f32(n) * zn1;
-    return array<vec2<f32>, 2>(fz, fpz);
+    switch n {
+        case 3u: {
+            // z^2: 1 cmul, z^3: 1 cmul (2 total vs 3+ in cpow_int)
+            let z2 = cmul(z, z);
+            let z3 = cmul(z2, z);
+            return array<vec2<f32>, 2>(
+                z3 - vec2<f32>(1.0, 0.0),
+                3.0 * z2
+            );
+        }
+        case 4u: {
+            // z^2, z^3 from z^2*z, z^4 from z^2*z^2 (3 cmuls)
+            let z2 = cmul(z, z);
+            let z3 = cmul(z2, z);
+            let z4 = cmul(z2, z2);
+            return array<vec2<f32>, 2>(
+                z4 - vec2<f32>(1.0, 0.0),
+                4.0 * z3
+            );
+        }
+        case 5u: {
+            // z^2, z^4 from z^2*z^2, z^5 from z^4*z (3 cmuls)
+            let z2 = cmul(z, z);
+            let z4 = cmul(z2, z2);
+            let z5 = cmul(z4, z);
+            return array<vec2<f32>, 2>(
+                z5 - vec2<f32>(1.0, 0.0),
+                5.0 * z4
+            );
+        }
+        default: {
+            // Generic path for n >= 6
+            let zn1 = cpow_int(z, n - 1u);
+            let zn = cmul(zn1, z);
+            return array<vec2<f32>, 2>(
+                zn - vec2<f32>(1.0, 0.0),
+                f32(n) * zn1
+            );
+        }
+    }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -143,37 +178,63 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let tol: f32 = 1e-6;
+    let tol2 = tol * tol;
     var iter: f32 = f32(max_i);
-
-    // Pre-compute f(z) and f'(z) for initial z; cache across iterations.
-    var ff = f_and_fp(z, n);
     var prev_step_mag2: f32 = 1e10;
 
-    for (var i: u32 = 0u; i < max_i; i++) {
-        let step_val = cdiv(ff[0], ff[1]);
-        let z_new = z - relax * step_val + nova_c;
+    // Pure Newton with degree 3: fused step z_new = (2*z^3 + 1) / (3*z^2)
+    // Avoids separate f(z)/f'(z) computation and the cdiv of the generic path.
+    let is_newton_3 = params.fractal_type == 4u && n == 3u;
 
-        // Convergence: |z_new - z|² < tol²
-        // This works for BOTH Newton (c=0, converges to f(z)=0) and Nova
-        // (c≠0, converges to a·f(z)/f'(z) = c, where f(z) ≠ 0).
-        let delta = z_new - z;
-        let step_mag2 = cmag2(delta);
+    if is_newton_3 {
+        for (var i: u32 = 0u; i < max_i; i++) {
+            let z2 = cmul(z, z);
+            let z3 = cmul(z2, z);
+            let num = 2.0 * z3 + vec2<f32>(1.0, 0.0);
+            let den = 3.0 * z2;
+            let z_new = cdiv(num, den);
 
-        if step_mag2 < tol * tol {
-            // Smooth iteration using consecutive step magnitudes
-            if prev_step_mag2 > step_mag2 && prev_step_mag2 > 0.0 {
-                iter = f32(i) + step_mag2 / prev_step_mag2;
-            } else {
-                iter = f32(i);
+            let delta = z_new - z;
+            let step_mag2 = cmag2(delta);
+
+            if step_mag2 < tol2 {
+                if prev_step_mag2 > step_mag2 && prev_step_mag2 > 0.0 {
+                    iter = f32(i) + step_mag2 / prev_step_mag2;
+                } else {
+                    iter = f32(i);
+                }
+                z = z_new;
+                break;
             }
-            z = z_new;
-            break;
-        }
 
-        prev_step_mag2 = step_mag2;
-        z = z_new;
-        // Cache f_and_fp for next iteration
-        ff = f_and_fp(z_new, n);
+            prev_step_mag2 = step_mag2;
+            z = z_new;
+        }
+    } else {
+        // Generic path: Newton (n != 3), Nova Julia, Nova Mandelbrot
+        var ff = f_and_fp(z, n);
+
+        for (var i: u32 = 0u; i < max_i; i++) {
+            let step_val = cdiv(ff[0], ff[1]);
+            let z_new = z - relax * step_val + nova_c;
+
+            let delta = z_new - z;
+            let step_mag2 = cmag2(delta);
+
+            if step_mag2 < tol2 {
+                if prev_step_mag2 > step_mag2 && prev_step_mag2 > 0.0 {
+                    iter = f32(i) + step_mag2 / prev_step_mag2;
+                } else {
+                    iter = f32(i);
+                }
+                z = z_new;
+                break;
+            }
+
+            prev_step_mag2 = step_mag2;
+            z = z_new;
+            ff = f_and_fp(z_new, n);
+        }
     }
 
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;

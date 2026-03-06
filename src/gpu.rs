@@ -69,7 +69,7 @@ pub struct GpuState {
     // Perturbation state
     pub using_perturbation: bool,
     ref_orbit_max_entries: u32, // current capacity of ref_orbit_buffer
-    cached_ref_orbit: Option<(Float, Float, u32, u32)>, // (center_re, center_im, max_iter, orbit_len)
+    cached_ref_orbit: Option<(Float, Float, u32, u32, u32, [f32; 2])>, // (center_re, center_im, max_iter, orbit_len, fractal_type, julia_c)
 
     // Staging buffer for batched sample params (avoids per-sample GPU sync)
     params_staging_buffer: wgpu::Buffer,
@@ -525,7 +525,8 @@ impl GpuState {
 
         // Determine if we should use perturbation (deep zoom Mandelbrot only)
         let pixel_step = params.pixel_step_x(self.display_width);
-        let use_perturb = params.fractal_type == crate::fractals::FractalType::Mandelbrot
+        let use_perturb = (params.fractal_type == crate::fractals::FractalType::Mandelbrot
+            || params.fractal_type == crate::fractals::FractalType::Julia)
             && pixel_step < 1e-7;
         self.using_perturbation = use_perturb;
 
@@ -539,19 +540,29 @@ impl GpuState {
 
         // Upload reference orbit if using perturbation (cached to avoid recomputation)
         if use_perturb {
+            let ft_idx = params.fractal_type.shader_index();
             let need_recompute = match &self.cached_ref_orbit {
                 None => true,
-                Some((prev_re, prev_im, prev_iter, _)) => {
+                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc)) => {
                     *prev_re != params.center_re
                         || *prev_im != params.center_im
                         || *prev_iter < params.max_iter
+                        || *prev_ft != ft_idx
+                        || *prev_jc != params.julia_c
                 }
             };
 
             if need_recompute {
                 self.ensure_ref_orbit_capacity(params.max_iter);
-                let perturb_data =
-                    crate::fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step);
+                let perturb_data = if params.fractal_type == crate::fractals::FractalType::Julia {
+                    crate::fractals::compute_julia_reference_orbit(
+                        &params.center_re, &params.center_im,
+                        params.julia_c[0] as f64, params.julia_c[1] as f64,
+                        params.max_iter, pixel_step,
+                    )
+                } else {
+                    crate::fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step)
+                };
                 self.queue.write_buffer(
                     &self.ref_orbit_buffer,
                     0,
@@ -567,7 +578,7 @@ impl GpuState {
                     0,
                     bytemuck::bytes_of(&perturb_gpu),
                 );
-                self.cached_ref_orbit = Some((params.center_re.clone(), params.center_im.clone(), params.max_iter, perturb_data.orbit_len));
+                self.cached_ref_orbit = Some((params.center_re.clone(), params.center_im.clone(), params.max_iter, perturb_data.orbit_len, ft_idx, params.julia_c));
             } else {
                 let orbit_len = self.cached_ref_orbit.as_ref().unwrap().3;
                 let perturb_gpu = PerturbGpuParams {

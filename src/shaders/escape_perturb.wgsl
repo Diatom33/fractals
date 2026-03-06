@@ -1,9 +1,12 @@
-// Perturbation-theory Mandelbrot compute shader with extended-range floats.
+// Perturbation-theory compute shader for Mandelbrot and Julia sets.
 // Uses a pre-computed reference orbit (arbitrary precision on CPU, stored as
 // double-single f32 pairs) and computes per-pixel perturbation deltas using
 // mantissa * 2^exponent representation.
 // This allows zoom depths far beyond f32's ~1e-38 limit (to 1e-300+).
 // Rebasing prevents glitches without multi-round rendering.
+//
+// Mandelbrot: z₀=0, c=pixel → delta_c=pixel_offset, delta_z₀=0
+// Julia:      z₀=pixel, c=fixed → delta_c=0, delta_z₀=pixel_offset
 
 struct Params {
     center_hi: vec2<f32>,
@@ -78,9 +81,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         dc_e = dc_e + dc_shift;
     }
 
+    let is_julia = params.fractal_type == 1u;
+
     // Perturbation iteration with extended-range delta
-    var dn_m = vec2<f32>(0.0, 0.0);  // mantissa
-    var dn_e: i32 = 0;                // exponent (arbitrary, dn starts at 0)
+    // Mandelbrot: delta_z₀ = 0, delta_c = pixel_offset
+    // Julia: delta_z₀ = pixel_offset, delta_c = 0
+    var dn_m: vec2<f32>;
+    var dn_e: i32;
+    if is_julia {
+        dn_m = dc_m;   // delta_z₀ = pixel offset
+        dn_e = dc_e;
+    } else {
+        dn_m = vec2<f32>(0.0, 0.0);
+        dn_e = 0;
+    }
     var iter: u32 = max_i;
     var ref_i: u32 = 0u;
 
@@ -95,6 +109,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let Zn_im_lo = Zn.w;
 
         // delta_{n+1} = 2 * Z_n * delta_n + delta_n^2 + delta_c
+        // (For Julia, delta_c = 0, so term 3 vanishes)
         //
         // Term 1: 2 * Z_n * dn_m (complex multiply with double-single Z_n)
         // Using FMA to get best f32 approximation of (Zn_hi + Zn_lo) * dn
@@ -112,17 +127,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         let t2_e = 2 * dn_e;
 
-        // Term 3: dc, at exponent dc_e
-        let t3 = dc_m;
-        let t3_e = dc_e;
+        // Term 3: dc (only for Mandelbrot; Julia has delta_c = 0)
+        var e_new: i32;
+        var sum: vec2<f32>;
+        if is_julia {
+            e_new = max(t1_e, t2_e);
+            let s1 = ldexp_v2(t1, t1_e - e_new);
+            let s2 = ldexp_v2(t2, t2_e - e_new);
+            sum = s1 + s2;
+        } else {
+            let t3 = dc_m;
+            let t3_e = dc_e;
+            e_new = max(t1_e, max(t2_e, t3_e));
+            let s1 = ldexp_v2(t1, t1_e - e_new);
+            let s2 = ldexp_v2(t2, t2_e - e_new);
+            let s3 = ldexp_v2(t3, t3_e - e_new);
+            sum = s1 + s2 + s3;
+        }
 
-        // Find max exponent and shift all terms to it
-        let e_new = max(t1_e, max(t2_e, t3_e));
-        let s1 = ldexp_v2(t1, t1_e - e_new);
-        let s2 = ldexp_v2(t2, t2_e - e_new);
-        let s3 = ldexp_v2(t3, t3_e - e_new);
-
-        dn_m = s1 + s2 + s3;
+        dn_m = sum;
         dn_e = e_new;
 
         // Renormalize to keep mantissa in good range

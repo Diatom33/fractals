@@ -472,6 +472,70 @@ pub fn compute_reference_orbit(
     PerturbData { orbit, orbit_len }
 }
 
+/// Compute a Julia reference orbit at arbitrary precision.
+/// Same as Mandelbrot but: z₀ = center (not 0), c = julia_c (not center).
+pub fn compute_julia_reference_orbit(
+    center_re: &Float,
+    center_im: &Float,
+    julia_c_re: f64,
+    julia_c_im: f64,
+    max_iter: u32,
+    pixel_step: f64,
+) -> PerturbData {
+    let zoom_digits = if pixel_step > 0.0 {
+        (-pixel_step.log10()).max(16.0) as u32
+    } else {
+        64
+    };
+    let precision = (zoom_digits * 4 + 64).max(128).max(center_re.prec());
+
+    let c_re = Float::with_val(precision, julia_c_re);
+    let c_im = Float::with_val(precision, julia_c_im);
+    // Julia: z₀ = center pixel (not 0)
+    let mut z_re = Float::with_val(precision, center_re);
+    let mut z_im = Float::with_val(precision, center_im);
+
+    let mut zr2 = Float::new(precision);
+    let mut zi2 = Float::new(precision);
+    let mut zri = Float::new(precision);
+
+    let mut orbit = Vec::with_capacity(max_iter as usize + 1);
+    let escape_r2 = 256.0_f64;
+
+    for _ in 0..max_iter {
+        let zr_f64 = z_re.to_f64();
+        let zi_f64 = z_im.to_f64();
+        let zr_hi = zr_f64 as f32;
+        let zr_lo = (zr_f64 - zr_hi as f64) as f32;
+        let zi_hi = zi_f64 as f32;
+        let zi_lo = (zi_f64 - zi_hi as f64) as f32;
+        orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
+
+        zr2.assign(z_re.square_ref());
+        zi2.assign(z_im.square_ref());
+        zri.assign(&z_re * &z_im);
+
+        z_re.assign(&zr2 - &zi2);
+        z_re += &c_re;
+        z_im.assign(&zri << 1u32);
+        z_im += &c_im;
+
+        let zr = z_re.to_f64();
+        let zi = z_im.to_f64();
+        if zr * zr + zi * zi > escape_r2 {
+            let zr_hi = zr as f32;
+            let zr_lo = (zr - zr_hi as f64) as f32;
+            let zi_hi = zi as f32;
+            let zi_lo = (zi - zi_hi as f64) as f32;
+            orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
+            break;
+        }
+    }
+
+    let orbit_len = orbit.len() as u32;
+    PerturbData { orbit, orbit_len }
+}
+
 /// GPU-side uniform struct. Must match WGSL layout exactly.
 /// Total 80 bytes. Uses center + pixel_step instead of raw bounds
 /// to enable double-single (emulated f64) precision in shaders.

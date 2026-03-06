@@ -211,7 +211,9 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
 
     // Perturbation resources
     let pixel_step = params.pixel_step_x(width);
-    let use_perturb = params.fractal_type == FractalType::Mandelbrot && pixel_step < 1e-7;
+    let use_perturb = (params.fractal_type == FractalType::Mandelbrot
+        || params.fractal_type == FractalType::Julia)
+        && pixel_step < 1e-7;
 
     let perturb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
@@ -238,7 +240,15 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let ps_mantissa_y = (step_y / ps_scale) as f32;
 
     if use_perturb {
-        let perturb_data = fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step);
+        let perturb_data = if params.fractal_type == FractalType::Julia {
+            fractals::compute_julia_reference_orbit(
+                &params.center_re, &params.center_im,
+                params.julia_c[0] as f64, params.julia_c[1] as f64,
+                params.max_iter, pixel_step,
+            )
+        } else {
+            fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step)
+        };
         queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
         let pgpu = PerturbGpuParams { ref_orbit_len: perturb_data.orbit_len, pixel_step_exp: ps_exp, _pad: [0; 2] };
         queue.write_buffer(&perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));
