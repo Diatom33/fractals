@@ -35,7 +35,7 @@ struct Params {
     palette: u32,
     sample_index: u32,
     num_samples: u32,
-    _pad: u32,
+    coloring_param: f32,
 }
 
 struct PerturbParams {

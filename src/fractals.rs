@@ -174,6 +174,7 @@ pub struct FractalParams {
     pub poly_degree: u32,     // Newton/Nova polynomial degree n (for z^n - 1)
     pub supersampling: u32,   // 1 = off, 2 = 2x2, 3 = 3x3
     pub palette: ColorPalette,
+    pub coloring_param: f32,  // palette-specific parameter (thin-film k, aurora freq, storm steepness)
     pub use_median: bool,     // true = median iteration SS, false = Oklab accumulation SS
 }
 
@@ -183,6 +184,9 @@ pub enum ColorPalette {
     Oklab,       // 1: Perceptually uniform lightness, varying hue
     Smooth,      // 2: iq-style cosine gradient
     Monochrome,  // 3: Single hue (blue), varying lightness
+    ThinFilm,    // 4: Soap bubble / oil slick iridescence
+    Aurora,      // 5: Midnight aurora green-violet bands
+    Storm,       // 6: Oppressive brass murk with lightning
 }
 
 impl ColorPalette {
@@ -191,6 +195,9 @@ impl ColorPalette {
         ColorPalette::Oklab,
         ColorPalette::Smooth,
         ColorPalette::Monochrome,
+        ColorPalette::ThinFilm,
+        ColorPalette::Aurora,
+        ColorPalette::Storm,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -199,6 +206,9 @@ impl ColorPalette {
             ColorPalette::Oklab => "Oklab Uniform",
             ColorPalette::Smooth => "Smooth Gradient",
             ColorPalette::Monochrome => "Monochrome",
+            ColorPalette::ThinFilm => "Thin Film",
+            ColorPalette::Aurora => "Midnight Aurora",
+            ColorPalette::Storm => "Storm",
         }
     }
 
@@ -208,6 +218,34 @@ impl ColorPalette {
             ColorPalette::Oklab => 1,
             ColorPalette::Smooth => 2,
             ColorPalette::Monochrome => 3,
+            ColorPalette::ThinFilm => 4,
+            ColorPalette::Aurora => 5,
+            ColorPalette::Storm => 6,
+        }
+    }
+
+    /// Default coloring_param value for this palette.
+    pub fn default_param(&self) -> f32 {
+        match self {
+            ColorPalette::ThinFilm => 2.0,   // angular lobe count
+            ColorPalette::Aurora => 3.0,      // band frequency
+            ColorPalette::Storm => 10.0,      // sigmoid steepness
+            _ => 0.0,
+        }
+    }
+
+    /// Whether this palette uses the coloring_param slider.
+    pub fn has_param(&self) -> bool {
+        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm)
+    }
+
+    /// Label for the coloring_param slider.
+    pub fn param_label(&self) -> &'static str {
+        match self {
+            ColorPalette::ThinFilm => "Iridescence lobes",
+            ColorPalette::Aurora => "Band frequency",
+            ColorPalette::Storm => "Contrast",
+            _ => "",
         }
     }
 }
@@ -228,6 +266,7 @@ impl Default for FractalParams {
             poly_degree: 3,
             supersampling: 1,
             palette: ColorPalette::Oklab,
+            coloring_param: ColorPalette::Oklab.default_param(),
             use_median: true,
         }
     }
@@ -335,7 +374,7 @@ impl FractalParams {
             palette: self.palette.shader_index(),
             sample_index: 0,
             num_samples: 1,
-            _pad: 0,
+            coloring_param: self.coloring_param,
         }
     }
 }
@@ -575,6 +614,6 @@ pub struct GpuParams {
     pub palette: u32,              // 4 bytes  (offset 80)
     pub sample_index: u32,         // 4 bytes  (offset 84) — which sub-pixel sample (0..N-1)
     pub num_samples: u32,          // 4 bytes  (offset 88) — total number of samples
-    pub _pad: u32,                 // 4 bytes  (offset 92) — align to 96
+    pub coloring_param: f32,       // 4 bytes  (offset 92) — palette-specific parameter
 }
 // Total: 96 bytes

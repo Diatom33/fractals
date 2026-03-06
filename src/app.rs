@@ -163,6 +163,7 @@ impl FractalApp {
             hash ^= u64::from_le_bytes(arr);
         }
         hash ^= self.params.use_median as u64;
+        hash ^= (self.params.coloring_param.to_bits() as u64) << 32;
         hash
     }
 }
@@ -303,7 +304,26 @@ impl eframe::App for FractalApp {
                                 }
                             });
                         if self.params.palette != prev_palette {
+                            self.params.coloring_param = self.params.palette.default_param();
                             self.needs_render = true;
+                        }
+
+                        // Palette-specific parameter slider
+                        if self.params.palette.has_param() {
+                            ui.add_space(2.0);
+                            ui.label(self.params.palette.param_label());
+                            let range = match self.params.palette {
+                                crate::fractals::ColorPalette::ThinFilm => 0.5..=12.0,
+                                crate::fractals::ColorPalette::Aurora => 0.5..=10.0,
+                                crate::fractals::ColorPalette::Storm => 2.0..=25.0,
+                                _ => 0.0..=1.0,
+                            };
+                            if ui.add(
+                                egui::Slider::new(&mut self.params.coloring_param, range)
+                                    .step_by(0.1)
+                            ).changed() {
+                                self.needs_render = true;
+                            }
                         }
 
                         let controls = self.params.fractal_type.visible_controls();

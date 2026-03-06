@@ -21,7 +21,7 @@ struct Params {
     palette: u32,
     sample_index: u32,
     num_samples: u32,
-    _pad: u32,
+    coloring_param: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -98,11 +98,72 @@ fn palette_mono(smooth_iter: f32) -> vec3<f32> {
     return vec3<f32>(val * 0.15, val * 0.3, val);
 }
 
-fn escape_color(smooth_iter: f32) -> vec3<f32> {
+// Palette 4: Thin-Film Interference
+fn palette_thin_film(smooth_iter: f32, z: vec2<f32>) -> vec3<f32> {
+    let k = params.coloring_param;
+    let log_iter = log2(smooth_iter + 1.0);
+    let t_base = sqrt(log_iter * 0.5);
+    let angle = atan2(z.y, z.x);
+    let viewing = abs(cos(angle * k));
+    let t_eff = t_base / max(viewing, 0.04);
+
+    let pi = 3.14159265;
+    let r = pow(sin(pi * t_eff / 0.650), 2.0);
+    let g = pow(sin(pi * t_eff / 0.550), 2.0);
+    let b = pow(sin(pi * t_eff / 0.450), 2.0);
+    return vec3<f32>(r, g, b);
+}
+
+// Palette 5: Midnight Aurora
+fn palette_aurora(smooth_iter: f32) -> vec3<f32> {
+    let freq = params.coloring_param;
+    let log_iter = log2(smooth_iter + 1.0);
+    let band = fract(log_iter * freq * 0.08);
+    let glow = smoothstep(0.3, 0.48, band) * (1.0 - smoothstep(0.52, 0.7, band));
+    let band2 = fract(log_iter * freq * 0.08 + 0.5);
+    let glow2 = smoothstep(0.35, 0.48, band2) * (1.0 - smoothstep(0.52, 0.65, band2)) * 0.3;
+    let hue_t = fract(log_iter * 0.07);
+    let green = vec3<f32>(0.05, 0.9, 0.25);
+    let teal = vec3<f32>(0.05, 0.7, 0.6);
+    let violet = vec3<f32>(0.4, 0.08, 0.8);
+    let pink = vec3<f32>(0.7, 0.1, 0.5);
+    var base_color: vec3<f32>;
+    if hue_t < 0.33 {
+        base_color = mix(green, teal, smoothstep(0.0, 0.33, hue_t));
+    } else if hue_t < 0.66 {
+        base_color = mix(teal, violet, smoothstep(0.33, 0.66, hue_t));
+    } else {
+        base_color = mix(violet, pink, smoothstep(0.66, 1.0, hue_t));
+    }
+    let hue_t2 = fract(log_iter * 0.07 + 0.4);
+    var sec_color: vec3<f32>;
+    if hue_t2 < 0.5 {
+        sec_color = mix(teal, violet, smoothstep(0.0, 0.5, hue_t2));
+    } else {
+        sec_color = mix(violet, green, smoothstep(0.5, 1.0, hue_t2));
+    }
+    let dark = vec3<f32>(0.008, 0.006, 0.02);
+    let primary = mix(dark, base_color, glow);
+    return primary + sec_color * glow2;
+}
+
+// Palette 6: Storm Threshold (gradient-based lightning not available in median mode — simplified)
+fn palette_storm(smooth_iter: f32) -> vec3<f32> {
+    let steepness = params.coloring_param;
+    let log_iter = log2(smooth_iter + 1.0);
+    let x_val = fract(log_iter * 0.1);
+    let v = 1.0 / (1.0 + exp(-steepness * (x_val - 0.5)));
+    return hsv_to_rgb(40.0 / 360.0, 0.18 + 0.12 * v, 0.12 + 0.18 * v);
+}
+
+fn escape_color(smooth_iter: f32, z: vec2<f32>) -> vec3<f32> {
     switch params.palette {
         case 1u: { return palette_oklab(smooth_iter); }
         case 2u: { return palette_smooth(smooth_iter); }
         case 3u: { return palette_mono(smooth_iter); }
+        case 4u: { return palette_thin_film(smooth_iter, z); }
+        case 5u: { return palette_aurora(smooth_iter); }
+        case 6u: { return palette_storm(smooth_iter); }
         default: { return palette_classic(smooth_iter); }
     }
 }
@@ -213,7 +274,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let z = final_z[idx];
         color = basin_color(median_iter, z, params.num_roots);
     } else {
-        color = escape_color(median_iter);
+        let z = final_z[idx];
+        color = escape_color(median_iter, z);
     }
 
     // Composite with interior coverage

@@ -78,8 +78,12 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                 "oklab" => fractals::ColorPalette::Oklab,
                 "smooth" => fractals::ColorPalette::Smooth,
                 "mono" | "monochrome" => fractals::ColorPalette::Monochrome,
+                "thinfilm" | "thin-film" | "film" => fractals::ColorPalette::ThinFilm,
+                "aurora" => fractals::ColorPalette::Aurora,
+                "storm" => fractals::ColorPalette::Storm,
                 _ => fractals::ColorPalette::Classic,
             };
+            params.coloring_param = params.palette.default_param();
         }
     }
 
