@@ -1,6 +1,7 @@
 // Escape-time fractal compute shader with emulated double precision.
-// Handles: Mandelbrot (0), Julia (1), Burning Ship (2), Multibrot (3)
-// Types 0-2 use double-single (f32 pair) arithmetic for deep zoom precision.
+// Handles: Mandelbrot (0), Julia (1), Burning Ship (2), Multibrot (3),
+//          Tricorn (7), Celtic (8), Perpendicular (9), Buffalo (10)
+// Types 0-2,7-10 use double-single (f32 pair) arithmetic for deep zoom precision.
 // Type 3 (Multibrot) falls back to f32 due to cpow complexity.
 
 struct Params {
@@ -174,7 +175,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             ci = vec2<f32>(params.julia_c.y, 0.0);
         }
         default: {
-            // Mandelbrot (0), Burning Ship (2): z₀ = 0, c = pixel
+            // Mandelbrot (0), Burning Ship (2), Tricorn (7), Celtic (8),
+            // Perpendicular (9), Buffalo (10): z₀ = 0, c = pixel
             zr = vec2<f32>(0.0, 0.0);
             zi = vec2<f32>(0.0, 0.0);
             cr = pixel_r;
@@ -193,17 +195,46 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if zi.x < 0.0 { zi = vec2<f32>(-zi.x, -zi.y); }
         }
 
+        // Save sign of zr before any modifications (needed for Perpendicular)
+        let zr_sign = zr.x;
+
         // z = z² + c (double-single complex arithmetic)
         let zr2 = ds_mul(zr, zr);       // zr²
         let zi2 = ds_mul(zi, zi);       // zi²
         let zri = ds_mul(zr, zi);       // zr * zi
-        let two_zri = ds_add(zri, zri); // 2 * zr * zi
+        var two_zri = ds_add(zri, zri); // 2 * zr * zi
 
-        // new_zr = zr² - zi² + cr
-        let diff = ds_add(zr2, vec2<f32>(-zi2.x, -zi2.y));
+        // new_zr = zr² - zi² (before adding c)
+        var diff = ds_add(zr2, vec2<f32>(-zi2.x, -zi2.y));
+
+        // Tricorn (7): conjugate z before squaring → negate imaginary part
+        if params.fractal_type == 7u {
+            two_zri = vec2<f32>(-two_zri.x, -two_zri.y);
+        }
+
+        // Celtic (8): take abs of real part of z² (double-single abs: negate both hi and lo)
+        if params.fractal_type == 8u {
+            if diff.x < 0.0 { diff = vec2<f32>(-diff.x, -diff.y); }
+        }
+
+        // Perpendicular (9): new_zi = -2*|zr|*zi + ci
+        // -2*|zr|*zi = -sign(zr) * 2*zr*zi = -sign(zr) * two_zri
+        if params.fractal_type == 9u {
+            if zr_sign >= 0.0 {
+                two_zri = vec2<f32>(-two_zri.x, -two_zri.y);
+            }
+            // else: zr was negative, |zr| = -zr, so -2*|zr|*zi = 2*zr*zi = two_zri (keep)
+        }
+
+        // Buffalo (10): real = abs(zr² - zi²), imag = -2*|zr|*|zi|
+        if params.fractal_type == 10u {
+            if diff.x < 0.0 { diff = vec2<f32>(-diff.x, -diff.y); }
+            // Make two_zri negative: -|2*zr*zi| = -2*|zr|*|zi|
+            if two_zri.x > 0.0 { two_zri = vec2<f32>(-two_zri.x, -two_zri.y); }
+        }
+
+        // new_zr = diff + cr, new_zi = two_zri + ci
         zr = ds_add(diff, cr);
-
-        // new_zi = 2*zr*zi + ci
         zi = ds_add(two_zri, ci);
 
         // Escape test (f32 is sufficient for |z|² > 256)

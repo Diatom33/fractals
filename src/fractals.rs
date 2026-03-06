@@ -11,6 +11,10 @@ pub enum FractalType {
     Newton,
     NovaJulia,
     NovaMandelbrot,
+    Tricorn,
+    Celtic,
+    Perpendicular,
+    Buffalo,
 }
 
 impl FractalType {
@@ -22,6 +26,10 @@ impl FractalType {
         FractalType::Newton,
         FractalType::NovaJulia,
         FractalType::NovaMandelbrot,
+        FractalType::Tricorn,
+        FractalType::Celtic,
+        FractalType::Perpendicular,
+        FractalType::Buffalo,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -33,6 +41,10 @@ impl FractalType {
             FractalType::Newton => "Newton",
             FractalType::NovaJulia => "Nova Julia",
             FractalType::NovaMandelbrot => "Nova Mandelbrot",
+            FractalType::Tricorn => "Tricorn",
+            FractalType::Celtic => "Celtic",
+            FractalType::Perpendicular => "Perpendicular",
+            FractalType::Buffalo => "Buffalo",
         }
     }
 
@@ -46,6 +58,10 @@ impl FractalType {
             FractalType::Newton => 4,
             FractalType::NovaJulia => 5,
             FractalType::NovaMandelbrot => 6,
+            FractalType::Tricorn => 7,
+            FractalType::Celtic => 8,
+            FractalType::Perpendicular => 9,
+            FractalType::Buffalo => 10,
         }
     }
 
@@ -57,6 +73,10 @@ impl FractalType {
                 | FractalType::Julia
                 | FractalType::BurningShip
                 | FractalType::Multibrot
+                | FractalType::Tricorn
+                | FractalType::Celtic
+                | FractalType::Perpendicular
+                | FractalType::Buffalo
         )
     }
 
@@ -77,13 +97,17 @@ impl FractalType {
             FractalType::Newton => [-2.0, 2.0, -2.0, 2.0],
             FractalType::NovaJulia => [-2.0, 2.0, -2.0, 2.0],
             FractalType::NovaMandelbrot => [-2.0, 2.0, -2.0, 2.0],
+            FractalType::Tricorn => [-2.5, 1.5, -2.0, 2.0],
+            FractalType::Celtic => [-2.5, 1.5, -2.0, 2.0],
+            FractalType::Perpendicular => [-2.5, 1.5, -2.0, 2.0],
+            FractalType::Buffalo => [-2.5, 1.5, -2.0, 2.0],
         }
     }
 
     /// Which controls should be visible for this fractal type.
     pub fn visible_controls(&self) -> Controls {
         match self {
-            FractalType::Mandelbrot | FractalType::BurningShip => Controls {
+            FractalType::Mandelbrot | FractalType::BurningShip | FractalType::Tricorn | FractalType::Celtic | FractalType::Perpendicular | FractalType::Buffalo => Controls {
                 power: false,
                 julia_c: false,
                 relaxation: false,
