@@ -1,6 +1,7 @@
 // Median finalize shader.
 // Reads all per-sample iteration values, finds the median of exterior samples,
 // maps that single iteration count to a color, composites with interior coverage.
+// Supports both escape-time and root-basin coloring (Newton/Nova).
 
 struct Params {
     center_hi: vec2<f32>,
@@ -26,6 +27,8 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> iterations: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;
+@group(0) @binding(3) var<storage, read> final_z: array<vec2<f32>>;
+@group(0) @binding(4) var<storage, read> roots: array<vec2<f32>>;
 
 // -- Oklab to linear sRGB ---------------------------------------------------
 
@@ -59,7 +62,11 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
     }
 }
 
-// -- Palettes (same as colorize.wgsl) ----------------------------------------
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return pow(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
+}
+
+// -- Escape-time palettes ----------------------------------------------------
 
 fn palette_classic(smooth_iter: f32) -> vec3<f32> {
     let log_iter = log2(smooth_iter + 1.0);
@@ -97,6 +104,41 @@ fn escape_color(smooth_iter: f32) -> vec3<f32> {
         case 2u: { return palette_smooth(smooth_iter); }
         case 3u: { return palette_mono(smooth_iter); }
         default: { return palette_classic(smooth_iter); }
+    }
+}
+
+// -- Root-basin coloring (Newton/Nova) ----------------------------------------
+
+fn basin_color(smooth_iter: f32, z: vec2<f32>, n_roots: u32) -> vec3<f32> {
+    var min_dist: f32 = 1e20;
+    var root_id: u32 = 0u;
+    for (var i: u32 = 0u; i < n_roots; i++) {
+        let root = roots[i];
+        let dx = z.x - root.x;
+        let dy = z.y - root.y;
+        let d = dx * dx + dy * dy;
+        if d < min_dist {
+            min_dist = d;
+            root_id = i;
+        }
+    }
+
+    let shade = 1.0 / (1.0 + 0.05 * smooth_iter);
+
+    switch params.palette {
+        case 1u: {
+            let golden = 0.618033988749895;
+            let hue_angle = f32(root_id) * golden * 6.28318;
+            let C = 0.13 * (0.6 + 0.4 * shade);
+            let linear = oklab_to_linear_srgb(0.5 + 0.35 * shade, C * cos(hue_angle), C * sin(hue_angle));
+            return linear_to_srgb(linear);
+        }
+        default: {
+            let golden = 0.618033988749895;
+            let hue = fract(f32(root_id) * golden);
+            let sat = 0.55 + 0.4 * shade;
+            return hsv_to_rgb(hue, sat, shade);
+        }
     }
 }
 
@@ -165,7 +207,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Color the median iteration value
-    let color = escape_color(median_iter);
+    var color: vec3<f32>;
+    if params.color_mode == 1u {
+        // Root-basin coloring: use final_z from last sample for root assignment
+        let z = final_z[idx];
+        color = basin_color(median_iter, z, params.num_roots);
+    } else {
+        color = escape_color(median_iter);
+    }
 
     // Composite with interior coverage
     let ext_coverage = f32(ext_count) / f32(n);

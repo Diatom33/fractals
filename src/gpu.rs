@@ -223,6 +223,8 @@ impl GpuState {
                     bgl_entry(0, wgpu::BufferBindingType::Uniform),
                     bgl_entry_storage(1, true),  // iterations (read_only)
                     bgl_entry_storage(2, false), // output (read_write)
+                    bgl_entry_storage(3, true),  // final_z (read_only)
+                    bgl_entry_storage(4, true),  // roots (read_only)
                 ],
             });
 
@@ -313,6 +315,8 @@ impl GpuState {
                 bg_entry(0, &params_buffer),
                 bg_entry(1, &iterations_buffer),
                 bg_entry(2, &output_buffer),
+                bg_entry(3, &final_z_buffer),
+                bg_entry(4, &roots_buffer),
             ],
         });
 
@@ -466,6 +470,8 @@ impl GpuState {
                     bg_entry(0, &self.params_buffer),
                     bg_entry(1, &self.iterations_buffer),
                     bg_entry(2, &self.output_buffer),
+                    bg_entry(3, &self.final_z_buffer),
+                    bg_entry(4, &self.roots_buffer),
                 ],
             });
             self.perturb_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {

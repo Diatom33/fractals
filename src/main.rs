@@ -384,10 +384,10 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         entries: &[be!(0, &params_buf), be!(1, &accum_buf), be!(2, &out_buf)],
     });
 
-    // Median finalize pipeline (reuses fin_layout shape: uniform, read, read_write)
+    // Median finalize pipeline (params, iterations, output, final_z, roots)
     let med_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false)],
+        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false), bgl_storage(3, true), bgl_storage(4, true)],
     });
     let med_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
@@ -402,7 +402,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let med_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &med_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &out_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &out_buf), be!(3, &z_buf), be!(4, &roots_buf)],
     });
 
     let wg_x = (width + 15) / 16;
