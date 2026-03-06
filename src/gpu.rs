@@ -291,10 +291,10 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        // Staging buffer for batched sample params (64 samples max × 80 bytes)
+        // Staging buffer for batched sample params (64 samples + 1 for finalize params)
         let params_staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("params_staging"),
-            size: 64 * std::mem::size_of::<GpuParams>() as u64,
+            size: 65 * std::mem::size_of::<GpuParams>() as u64,
             usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -611,7 +611,22 @@ impl GpuState {
             }
         }
 
-        // Finalize: divide accumulated color by weight, pack to RGBA
+        // Finalize: stage total_weight params at the end of staging buffer, copy to params
+        {
+            let total_weight: f32 = samples.iter().map(|s| s.2).sum();
+            let mut fin_params = base_gpu_params;
+            fin_params.sample_weight = total_weight;
+            if use_perturb {
+                fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
+            }
+            let fin_offset = samples.len() as u64 * params_size;
+            self.queue.write_buffer(&self.params_staging_buffer, fin_offset, bytemuck::bytes_of(&fin_params));
+            encoder.copy_buffer_to_buffer(
+                &self.params_staging_buffer, fin_offset,
+                &self.params_buffer, 0,
+                params_size,
+            );
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("finalize"),

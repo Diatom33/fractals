@@ -46,6 +46,10 @@ pub struct FractalApp {
     drag_view: Option<ViewState>,
     drag_pixel_offset: egui::Vec2,
 
+    // Zoom preview: show scaled old texture while waiting for re-render
+    // UV rect into the previous texture that corresponds to the new view
+    zoom_preview_uv: Option<egui::Rect>,
+
     // Interactive rendering: SS=1 during rapid input, full SS after idle
     pending_quality_render: bool,
     last_input_time: std::time::Instant,
@@ -91,6 +95,7 @@ impl FractalApp {
             drag_start: None,
             drag_view: None,
             drag_pixel_offset: egui::Vec2::ZERO,
+            zoom_preview_uv: None,
             pending_quality_render: false,
             last_input_time: std::time::Instant::now(),
             export_path: String::from("fractal.png"),
@@ -557,16 +562,18 @@ impl eframe::App for FractalApp {
                             &pixels,
                         );
                         match &mut self.texture_handle {
-                            Some(h) => h.set(image, egui::TextureOptions::NEAREST),
+                            Some(h) => h.set(image, egui::TextureOptions::LINEAR),
                             None => {
                                 self.texture_handle = Some(ctx.load_texture(
                                     "fractal",
                                     image,
-                                    egui::TextureOptions::NEAREST,
+                                    egui::TextureOptions::LINEAR,
                                 ));
                             }
                         }
                     }
+                    // Fresh render matches the current view — clear zoom preview
+                    self.zoom_preview_uv = None;
                 }
 
                 // Display image filling the panel
@@ -578,13 +585,16 @@ impl eframe::App for FractalApp {
 
                     // Offset texture during drag for instant visual feedback
                     let draw_rect = rect.translate(self.drag_pixel_offset);
-                    ui.painter().image(
-                        handle.id(),
-                        draw_rect,
+                    let uv_rect = self.zoom_preview_uv.unwrap_or(
                         egui::Rect::from_min_max(
                             egui::pos2(0.0, 0.0),
                             egui::pos2(1.0, 1.0),
                         ),
+                    );
+                    ui.painter().image(
+                        handle.id(),
+                        draw_rect,
+                        uv_rect,
                         egui::Color32::WHITE,
                     );
 
@@ -645,6 +655,39 @@ impl FractalApp {
                     self.params.center_im += shift_im;
                     self.params.half_range_x *= factor;
                     self.params.half_range_y *= factor;
+
+                    // Compute zoom preview UV rect for instant visual feedback.
+                    // In the new view, normalized position p maps to old-view
+                    // position: nx + (p - nx) * factor (and similarly for y).
+                    // So UV min (p=0) = nx*(1-factor), UV max (p=1) = nx + (1-nx)*factor.
+                    let nx = frac_x as f32;
+                    let ny = frac_y as f32;
+                    let f = factor as f32;
+                    let new_uv = egui::Rect::from_min_max(
+                        egui::pos2(nx * (1.0 - f), ny * (1.0 - f)),
+                        egui::pos2(nx + (1.0 - nx) * f, ny + (1.0 - ny) * f),
+                    );
+                    // Compose with existing preview UV if user scrolls multiple
+                    // times before a render completes.
+                    self.zoom_preview_uv = Some(match self.zoom_preview_uv {
+                        Some(prev) => {
+                            // Map new_uv through prev: result.min = prev.min + new_uv.min * prev.size()
+                            let pw = prev.width();
+                            let ph = prev.height();
+                            egui::Rect::from_min_max(
+                                egui::pos2(
+                                    prev.min.x + new_uv.min.x * pw,
+                                    prev.min.y + new_uv.min.y * ph,
+                                ),
+                                egui::pos2(
+                                    prev.min.x + new_uv.max.x * pw,
+                                    prev.min.y + new_uv.max.y * ph,
+                                ),
+                            )
+                        }
+                        None => new_uv,
+                    });
+
                     self.mark_interactive();
                     self.needs_render = true;
                 }
@@ -779,6 +822,31 @@ impl FractalApp {
                 self.params.half_range_x *= factor;
                 self.params.half_range_y *= factor;
                 self.params.ensure_precision();
+
+                // Zoom preview centered at (0.5, 0.5)
+                let f = factor as f32;
+                let new_uv = egui::Rect::from_min_max(
+                    egui::pos2(0.5 * (1.0 - f), 0.5 * (1.0 - f)),
+                    egui::pos2(0.5 + 0.5 * f, 0.5 + 0.5 * f),
+                );
+                self.zoom_preview_uv = Some(match self.zoom_preview_uv {
+                    Some(prev) => {
+                        let pw = prev.width();
+                        let ph = prev.height();
+                        egui::Rect::from_min_max(
+                            egui::pos2(
+                                prev.min.x + new_uv.min.x * pw,
+                                prev.min.y + new_uv.min.y * ph,
+                            ),
+                            egui::pos2(
+                                prev.min.x + new_uv.max.x * pw,
+                                prev.min.y + new_uv.max.y * ph,
+                            ),
+                        )
+                    }
+                    None => new_uv,
+                });
+
                 self.mark_interactive();
                 self.needs_render = true;
             }

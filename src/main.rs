@@ -121,8 +121,15 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     println!("Exporting {} to {} ...", params.fractal_type.name(), path);
 
     // Build a minimal pipeline inline for headless rendering
-    let width = 1920u32;
-    let height = 1080u32;
+    // Parse --width and --height (default 1920x1080)
+    let width = args.iter().position(|a| a == "--width")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1920);
+    let height = args.iter().position(|a| a == "--height")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1080);
     let ss = params.supersampling;
     // Align width to 64-pixel boundary (wgpu row alignment requirement)
     let align = |w: u32| -> u32 { (w + 63) / 64 * 64 };
@@ -373,7 +380,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     // Staging buffer for batched sample params
     let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: samples.len() as u64 * params_size,
+        size: (samples.len() as u64 + 1) * params_size,
         usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -418,6 +425,19 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
             pass.set_bind_group(0, &col_bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
+    }
+
+    // Stage finalize params with total_weight
+    {
+        let total_weight: f32 = samples.iter().map(|s| s.2).sum();
+        let mut fin_params = base_gpu_params;
+        fin_params.sample_weight = total_weight;
+        if use_perturb {
+            fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
+        }
+        let fin_offset = samples.len() as u64 * params_size;
+        queue.write_buffer(&staging_buf, fin_offset, bytemuck::bytes_of(&fin_params));
+        encoder.copy_buffer_to_buffer(&staging_buf, fin_offset, &params_buf, 0, params_size);
     }
 
     // Finalize + readback
