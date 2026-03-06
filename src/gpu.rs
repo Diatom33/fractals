@@ -6,6 +6,10 @@
 use crate::fractals::{FractalParams, GpuParams, PerturbGpuParams};
 use rug::Float;
 
+/// Max sub-pixel samples for median mode. 9 (3×3) keeps the iterations buffer
+/// under 128MB binding limit at 1920×1080 (9 * 1920 * 1080 * 4 = 75MB).
+pub const MAX_MEDIAN_SAMPLES: u32 = 9;
+
 /// Align width so bytes_per_row (width * 4) is a multiple of COPY_BYTES_PER_ROW_ALIGNMENT (256).
 pub fn align_width(w: u32) -> u32 {
     let align = 256 / 4; // 64 pixels
@@ -22,6 +26,7 @@ pub struct GpuState {
     newton_pipeline: wgpu::ComputePipeline,
     colorize_pipeline: wgpu::ComputePipeline,
     finalize_pipeline: wgpu::ComputePipeline,
+    median_finalize_pipeline: wgpu::ComputePipeline,
 
     // Buffers
     params_buffer: wgpu::Buffer,
@@ -36,12 +41,14 @@ pub struct GpuState {
     newton_bind_group: wgpu::BindGroup,
     colorize_bind_group: wgpu::BindGroup,
     finalize_bind_group: wgpu::BindGroup,
+    median_finalize_bind_group: wgpu::BindGroup,
 
     // Bind group layouts (needed for rebuilding)
     escape_bind_group_layout: wgpu::BindGroupLayout,
     newton_bind_group_layout: wgpu::BindGroupLayout,
     colorize_bind_group_layout: wgpu::BindGroupLayout,
     finalize_bind_group_layout: wgpu::BindGroupLayout,
+    median_finalize_bind_group_layout: wgpu::BindGroupLayout,
 
     // Perturbation pipeline (for deep zoom Mandelbrot)
     perturb_pipeline: wgpu::ComputePipeline,
@@ -101,6 +108,10 @@ impl GpuState {
             label: Some("finalize"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/finalize.wgsl").into()),
         });
+        let median_finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("median_finalize"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/median_finalize.wgsl").into()),
+        });
 
         // Uniform buffer
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -113,7 +124,7 @@ impl GpuState {
         // Storage buffers — all at output resolution
         let iterations_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("iterations"),
-            size: out_pixels * 4, // f32 per pixel
+            size: out_pixels * 4 * MAX_MEDIAN_SAMPLES as u64, // f32 per pixel × N samples for median
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -205,6 +216,16 @@ impl GpuState {
                 ],
             });
 
+        let median_finalize_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("median_finalize layout"),
+                entries: &[
+                    bgl_entry(0, wgpu::BufferBindingType::Uniform),
+                    bgl_entry_storage(1, true),  // iterations (read_only)
+                    bgl_entry_storage(2, false), // output (read_write)
+                ],
+            });
+
         // Compute pipelines
         let escape_pipeline = create_pipeline(device, &escape_shader, &escape_bind_group_layout);
         let newton_pipeline = create_pipeline(device, &newton_shader, &newton_bind_group_layout);
@@ -212,6 +233,8 @@ impl GpuState {
             create_pipeline(device, &colorize_shader, &colorize_bind_group_layout);
         let finalize_pipeline =
             create_pipeline(device, &finalize_shader, &finalize_bind_group_layout);
+        let median_finalize_pipeline =
+            create_pipeline(device, &median_finalize_shader, &median_finalize_bind_group_layout);
 
         // Perturbation bind group layout + pipeline
         let perturb_bind_group_layout =
@@ -283,6 +306,16 @@ impl GpuState {
             ],
         });
 
+        let median_finalize_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("median_finalize bg"),
+            layout: &median_finalize_bind_group_layout,
+            entries: &[
+                bg_entry(0, &params_buffer),
+                bg_entry(1, &iterations_buffer),
+                bg_entry(2, &output_buffer),
+            ],
+        });
+
         // CPU readback buffer (same size as output_buffer)
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -320,6 +353,9 @@ impl GpuState {
             newton_bind_group_layout,
             colorize_bind_group_layout,
             finalize_bind_group_layout,
+            median_finalize_pipeline,
+            median_finalize_bind_group,
+            median_finalize_bind_group_layout,
             perturb_pipeline,
             perturb_bind_group_layout,
             perturb_bind_group,
@@ -354,7 +390,7 @@ impl GpuState {
 
             self.iterations_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("iterations"),
-                size: out_pixels * 4,
+                size: out_pixels * 4 * MAX_MEDIAN_SAMPLES as u64,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
@@ -423,6 +459,15 @@ impl GpuState {
                     bg_entry(2, &self.output_buffer),
                 ],
             });
+            self.median_finalize_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("median_finalize bg"),
+                layout: &self.median_finalize_bind_group_layout,
+                entries: &[
+                    bg_entry(0, &self.params_buffer),
+                    bg_entry(1, &self.iterations_buffer),
+                    bg_entry(2, &self.output_buffer),
+                ],
+            });
             self.perturb_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("perturb bg"),
                 layout: &self.perturb_bind_group_layout,
@@ -465,7 +510,7 @@ impl GpuState {
 
     /// Run the fractal compute + colorize pipeline with multi-pass accumulation
     /// supersampling, then finalize and update the display texture.
-    pub fn render(&mut self, params: &FractalParams, effective_ss: u32) {
+    pub fn render(&mut self, params: &FractalParams, effective_ss: u32, use_median: bool) {
         let start = std::time::Instant::now();
 
         let ss = effective_ss;
@@ -542,7 +587,12 @@ impl GpuState {
                 .write_buffer(&self.roots_buffer, 0, bytemuck::cast_slice(&padded));
         }
 
-        let samples = crate::fractals::compute_samples(ss);
+        let mut samples = crate::fractals::compute_samples(ss);
+        // In median mode, clamp to MAX_MEDIAN_SAMPLES (iterations buffer capacity)
+        if use_median && samples.len() > MAX_MEDIAN_SAMPLES as usize {
+            samples.truncate(MAX_MEDIAN_SAMPLES as usize);
+        }
+        let num_samples = samples.len() as u32;
         let params_size = std::mem::size_of::<GpuParams>() as u64;
 
         // Stage all sample params into staging buffer (CPU side, no GPU sync needed)
@@ -551,6 +601,8 @@ impl GpuState {
             let mut gpu_params = base_gpu_params;
             gpu_params.sample_offset = [offset_x, offset_y];
             gpu_params.sample_weight = weight;
+            gpu_params.sample_index = if use_median { i as u32 } else { 0 };
+            gpu_params.num_samples = num_samples;
             if use_perturb {
                 gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
             }
@@ -568,7 +620,9 @@ impl GpuState {
                 label: Some("render"),
             });
 
-        encoder.clear_buffer(&self.accum_buffer, 0, None);
+        if !use_median {
+            encoder.clear_buffer(&self.accum_buffer, 0, None);
+        }
 
         for i in 0..samples.len() {
             // Copy this sample's params from staging to the uniform buffer
@@ -599,8 +653,8 @@ impl GpuState {
                 pass.dispatch_workgroups(wg_x, wg_y, 1);
             }
 
-            // Colorize and accumulate
-            {
+            // Colorize and accumulate (only in non-median mode)
+            if !use_median {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("accumulate"),
                     timestamp_writes: None,
@@ -611,13 +665,16 @@ impl GpuState {
             }
         }
 
-        // Finalize: stage total_weight params at the end of staging buffer, copy to params
+        // Finalize pass
         {
-            let total_weight: f32 = samples.iter().map(|s| s.2).sum();
             let mut fin_params = base_gpu_params;
-            fin_params.sample_weight = total_weight;
+            fin_params.num_samples = num_samples;
             if use_perturb {
                 fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
+            }
+            if !use_median {
+                let total_weight: f32 = samples.iter().map(|s| s.2).sum();
+                fin_params.sample_weight = total_weight;
             }
             let fin_offset = samples.len() as u64 * params_size;
             self.queue.write_buffer(&self.params_staging_buffer, fin_offset, bytemuck::bytes_of(&fin_params));
@@ -632,8 +689,13 @@ impl GpuState {
                 label: Some("finalize"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.finalize_pipeline);
-            pass.set_bind_group(0, &self.finalize_bind_group, &[]);
+            if use_median {
+                pass.set_pipeline(&self.median_finalize_pipeline);
+                pass.set_bind_group(0, &self.median_finalize_bind_group, &[]);
+            } else {
+                pass.set_pipeline(&self.finalize_pipeline);
+                pass.set_bind_group(0, &self.finalize_bind_group, &[]);
+            }
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 

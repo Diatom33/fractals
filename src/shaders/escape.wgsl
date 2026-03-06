@@ -19,6 +19,8 @@ struct Params {
     sample_weight: f32,
     stride: u32,
     palette: u32,
+    sample_index: u32,
+    num_samples: u32,
     _pad: u32,
 }
 
@@ -149,7 +151,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             smooth_val = f32(max_i);
         }
-        iterations[idx] = smooth_val;
+        // Write to per-sample slot for median mode, or same slot for normal mode
+        let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
+        iterations[iter_idx] = smooth_val;
         final_z[idx] = z;
         return;
     }
@@ -219,6 +223,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         smooth_val = f32(max_i);
     }
 
-    iterations[idx] = smooth_val;
+    let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
+    iterations[iter_idx] = smooth_val;
     final_z[idx] = vec2<f32>(zr.x, zi.x);
 }

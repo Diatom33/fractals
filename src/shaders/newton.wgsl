@@ -18,6 +18,8 @@ struct Params {
     sample_weight: f32,
     stride: u32,
     palette: u32,
+    sample_index: u32,
+    num_samples: u32,
     _pad: u32,
 }
 
@@ -174,6 +176,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         ff = f_and_fp(z_new, n);
     }
 
-    iterations[idx] = iter;
+    let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
+    iterations[iter_idx] = iter;
     final_z[idx] = z;
 }

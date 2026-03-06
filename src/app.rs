@@ -162,6 +162,7 @@ impl FractalApp {
             arr[..chunk.len()].copy_from_slice(chunk);
             hash ^= u64::from_le_bytes(arr);
         }
+        hash ^= self.params.use_median as u64;
         hash
     }
 }
@@ -268,6 +269,21 @@ impl eframe::App for FractalApp {
                                 );
                             });
                         if self.params.supersampling != prev_ss {
+                            self.needs_render = true;
+                        }
+
+                        // AA filter mode
+                        let prev_median = self.params.use_median;
+                        ui.add_space(2.0);
+                        ui.label("AA filter:");
+                        egui::ComboBox::from_id_salt("aa_filter")
+                            .width(ui.available_width() - 8.0)
+                            .selected_text(if self.params.use_median { "Median" } else { "Accumulate" })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.params.use_median, false, "Accumulate");
+                                ui.selectable_value(&mut self.params.use_median, true, "Median");
+                            });
+                        if self.params.use_median != prev_median {
                             self.needs_render = true;
                         }
 
@@ -484,6 +500,12 @@ impl eframe::App for FractalApp {
                         ui.monospace(
                             egui::RichText::new(format!("1e-{}", zoom_exp)).weak(),
                         );
+                        if self.params.use_median && self.params.supersampling > 1 {
+                            ui.monospace(
+                                egui::RichText::new("MEDIAN")
+                                    .color(egui::Color32::from_rgb(150, 220, 255)),
+                            );
+                        }
                         if gpu.using_perturbation {
                             ui.monospace(
                                 egui::RichText::new("PERTURB")
@@ -547,7 +569,7 @@ impl eframe::App for FractalApp {
                         } else {
                             self.params.supersampling
                         };
-                        gpu.render(&self.params, render_ss);
+                        gpu.render(&self.params, render_ss, self.params.use_median);
                     }
                     self.prev_params_hash = self.params_hash();
                     self.needs_render = false;

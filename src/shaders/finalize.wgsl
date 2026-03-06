@@ -18,6 +18,8 @@ struct Params {
     sample_weight: f32,       // total_weight is passed here by the host
     stride: u32,
     palette: u32,
+    sample_index: u32,
+    num_samples: u32,
     _pad: u32,
 }
 

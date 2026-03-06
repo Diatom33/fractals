@@ -149,6 +149,7 @@ pub struct FractalParams {
     pub poly_degree: u32,     // Newton/Nova polynomial degree n (for z^n - 1)
     pub supersampling: u32,   // 1 = off, 2 = 2x2, 3 = 3x3
     pub palette: ColorPalette,
+    pub use_median: bool,     // true = median iteration SS, false = Oklab accumulation SS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +203,7 @@ impl Default for FractalParams {
             poly_degree: 3,
             supersampling: 1,
             palette: ColorPalette::Oklab,
+            use_median: true,
         }
     }
 }
@@ -306,6 +308,8 @@ impl FractalParams {
             sample_weight: 1.0,
             stride,
             palette: self.palette.shader_index(),
+            sample_index: 0,
+            num_samples: 1,
             _pad: 0,
         }
     }
@@ -465,6 +469,8 @@ pub struct GpuParams {
     pub sample_weight: f32,        // 4 bytes  (offset 72)
     pub stride: u32,               // 4 bytes  (offset 76)
     pub palette: u32,              // 4 bytes  (offset 80)
-    pub _pad: u32,                 // 4 bytes  (offset 84) — align to 88 (multiple of 8 for WGSL vec2 alignment)
+    pub sample_index: u32,         // 4 bytes  (offset 84) — which sub-pixel sample (0..N-1)
+    pub num_samples: u32,          // 4 bytes  (offset 88) — total number of samples
+    pub _pad: u32,                 // 4 bytes  (offset 92) — align to 96
 }
-// Total: 88 bytes
+// Total: 96 bytes

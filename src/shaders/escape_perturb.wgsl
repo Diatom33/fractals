@@ -21,6 +21,8 @@ struct Params {
     sample_weight: f32,
     stride: u32,
     palette: u32,
+    sample_index: u32,
+    num_samples: u32,
     _pad: u32,
 }
 
@@ -178,7 +180,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         smooth_val = f32(max_i);
     }
 
-    iterations[idx] = smooth_val;
+    let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
+    iterations[iter_idx] = smooth_val;
 
     // Store final z for coloring
     let dn_out = ldexp_v2(dn_m, dn_e);

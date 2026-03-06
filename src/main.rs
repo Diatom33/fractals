@@ -82,6 +82,14 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         }
     }
 
+    // Parse --no-median / --median (default: median on)
+    if args.iter().any(|a| a == "--no-median") {
+        params.use_median = false;
+    }
+    if args.iter().any(|a| a == "--median") {
+        params.use_median = true;
+    }
+
     // Parse --iter
     if let Some(pos) = args.iter().position(|a| a == "--iter") {
         if let Some(val) = args.get(pos + 1) {
@@ -152,6 +160,10 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         label: None,
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/finalize.wgsl").into()),
     });
+    let median_finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/median_finalize.wgsl").into()),
+    });
 
     let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
@@ -159,9 +171,10 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let use_median = params.use_median;
     let iter_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: out_pixels * 4, // f32 per pixel
+        size: out_pixels * 4 * if use_median { gpu::MAX_MEDIAN_SAMPLES as u64 } else { 1 },
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -371,10 +384,35 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         entries: &[be!(0, &params_buf), be!(1, &accum_buf), be!(2, &out_buf)],
     });
 
+    // Median finalize pipeline (reuses fin_layout shape: uniform, read, read_write)
+    let med_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false)],
+    });
+    let med_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&med_layout], push_constant_ranges: &[],
+        })),
+        module: &median_finalize_shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let med_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &med_layout,
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &out_buf)],
+    });
+
     let wg_x = (width + 15) / 16;
     let wg_y = (height + 15) / 16;
 
-    let samples = fractals::compute_samples(ss);
+    let mut samples = fractals::compute_samples(ss);
+    if use_median && samples.len() > gpu::MAX_MEDIAN_SAMPLES as usize {
+        samples.truncate(gpu::MAX_MEDIAN_SAMPLES as usize);
+    }
+    let num_samples = samples.len() as u32;
     let params_size = std::mem::size_of::<GpuParams>() as u64;
 
     // Staging buffer for batched sample params
@@ -391,6 +429,8 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         let mut gpu_params = base_gpu_params;
         gpu_params.sample_offset = [offset_x, offset_y];
         gpu_params.sample_weight = weight;
+        gpu_params.sample_index = if use_median { i as u32 } else { 0 };
+        gpu_params.num_samples = num_samples;
         if use_perturb {
             gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
         }
@@ -399,7 +439,9 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
 
     // Single command buffer for all work
     let mut encoder = device.create_command_encoder(&Default::default());
-    encoder.clear_buffer(&accum_buf, 0, None);
+    if !use_median {
+        encoder.clear_buffer(&accum_buf, 0, None);
+    }
 
     for i in 0..samples.len() {
         encoder.copy_buffer_to_buffer(&staging_buf, i as u64 * params_size, &params_buf, 0, params_size);
@@ -419,7 +461,8 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
-        {
+        // Colorize and accumulate (only in non-median mode)
+        if !use_median {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&col_pipe);
             pass.set_bind_group(0, &col_bg, &[]);
@@ -427,11 +470,14 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         }
     }
 
-    // Stage finalize params with total_weight
+    // Finalize pass
     {
-        let total_weight: f32 = samples.iter().map(|s| s.2).sum();
         let mut fin_params = base_gpu_params;
-        fin_params.sample_weight = total_weight;
+        fin_params.num_samples = num_samples;
+        if !use_median {
+            let total_weight: f32 = samples.iter().map(|s| s.2).sum();
+            fin_params.sample_weight = total_weight;
+        }
         if use_perturb {
             fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
         }
@@ -439,12 +485,15 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         queue.write_buffer(&staging_buf, fin_offset, bytemuck::bytes_of(&fin_params));
         encoder.copy_buffer_to_buffer(&staging_buf, fin_offset, &params_buf, 0, params_size);
     }
-
-    // Finalize + readback
     {
         let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&fin_pipe);
-        pass.set_bind_group(0, &fin_bg, &[]);
+        if use_median {
+            pass.set_pipeline(&med_pipe);
+            pass.set_bind_group(0, &med_bg, &[]);
+        } else {
+            pass.set_pipeline(&fin_pipe);
+            pass.set_bind_group(0, &fin_bg, &[]);
+        }
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
     encoder.copy_buffer_to_buffer(&out_buf, 0, &readback_buf, 0, out_pixels * 4);

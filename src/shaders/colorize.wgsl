@@ -24,6 +24,8 @@ struct Params {
     sample_weight: f32,
     stride: u32,
     palette: u32,            // 0=Classic, 1=Oklab, 2=Smooth, 3=Monochrome
+    sample_index: u32,
+    num_samples: u32,
     _pad: u32,
 }
 
@@ -197,7 +199,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * params.stride + x;
     let max_iter = f32(params.max_iter);
-    let smooth_iter = iterations[idx];
+    let iter_idx = params.sample_index * params.stride * h + idx;
+    let smooth_iter = iterations[iter_idx];
     let z = final_z[idx];
     let wt = params.sample_weight;
     let prev = accum[idx];
