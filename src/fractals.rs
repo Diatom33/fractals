@@ -1,6 +1,7 @@
 /// Fractal type definitions, parameters, and defaults.
 
 use rug::{Assign, Float};
+use rug::ops::NegAssign;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FractalType {
@@ -405,15 +406,19 @@ pub struct PerturbData {
     pub orbit_len: u32,
 }
 
-/// Compute a reference orbit at arbitrary precision using rug (GMP/MPFR).
-/// Uses in-place operations to avoid heap allocations in the hot loop.
-pub fn compute_reference_orbit(
+
+/// Compute a reference orbit for any z²+c escape-time variant.
+/// The variant determines how z is modified before/after squaring.
+/// Stores the raw Z_n (NOT the modified version) — the GPU computes
+/// signs and abs from the stored values as needed.
+pub fn compute_variant_reference_orbit(
     center_re: &Float,
     center_im: &Float,
     max_iter: u32,
     pixel_step: f64,
+    fractal_type: FractalType,
+    julia_c: Option<(f64, f64)>,
 ) -> PerturbData {
-    // Precision: ~3.32 bits per decimal digit of zoom depth, plus safety margin
     let zoom_digits = if pixel_step > 0.0 {
         (-pixel_step.log10()).max(16.0) as u32
     } else {
@@ -421,12 +426,24 @@ pub fn compute_reference_orbit(
     };
     let precision = (zoom_digits * 4 + 64).max(128).max(center_re.prec());
 
-    let c_re = Float::with_val(precision, center_re);
-    let c_im = Float::with_val(precision, center_im);
-    let mut z_re = Float::with_val(precision, 0.0);
-    let mut z_im = Float::with_val(precision, 0.0);
+    let is_julia = fractal_type == FractalType::Julia;
+    let (c_re, c_im, mut z_re, mut z_im) = if is_julia {
+        let jc = julia_c.unwrap_or((0.0, 0.0));
+        (
+            Float::with_val(precision, jc.0),
+            Float::with_val(precision, jc.1),
+            Float::with_val(precision, center_re),
+            Float::with_val(precision, center_im),
+        )
+    } else {
+        (
+            Float::with_val(precision, center_re),
+            Float::with_val(precision, center_im),
+            Float::with_val(precision, 0.0),
+            Float::with_val(precision, 0.0),
+        )
+    };
 
-    // Scratch variables reused every iteration (no allocations in hot loop)
     let mut zr2 = Float::new(precision);
     let mut zi2 = Float::new(precision);
     let mut zri = Float::new(precision);
@@ -435,7 +452,6 @@ pub fn compute_reference_orbit(
     let escape_r2 = 256.0_f64;
 
     for _ in 0..max_iter {
-        // Store orbit as double-single (Dekker split of f64 → f32 hi + f32 lo)
         let zr_f64 = z_re.to_f64();
         let zi_f64 = z_im.to_f64();
         let zr_hi = zr_f64 as f32;
@@ -444,81 +460,81 @@ pub fn compute_reference_orbit(
         let zi_lo = (zi_f64 - zi_hi as f64) as f32;
         orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
 
-        // z = z^2 + c using in-place ops (no heap allocs)
-        zr2.assign(z_re.square_ref());       // zr2 = z_re^2
-        zi2.assign(z_im.square_ref());       // zi2 = z_im^2
-        zri.assign(&z_re * &z_im);          // zri = z_re * z_im
-
-        z_re.assign(&zr2 - &zi2);           // z_re = zr2 - zi2
-        z_re += &c_re;                       // z_re += c_re
-
-        z_im.assign(&zri << 1u32);           // z_im = 2 * zri
-        z_im += &c_im;                       // z_im += c_im
-
-        // Escape check using f64 (avoids 2 arb-prec multiplications)
-        let zr = z_re.to_f64();
-        let zi = z_im.to_f64();
-        if zr * zr + zi * zi > escape_r2 {
-            let zr_hi = zr as f32;
-            let zr_lo = (zr - zr_hi as f64) as f32;
-            let zi_hi = zi as f32;
-            let zi_lo = (zi - zi_hi as f64) as f32;
-            orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
-            break;
+        // Apply variant-specific iteration
+        match fractal_type {
+            FractalType::BurningShip => {
+                // z = (|Re(z)| + i|Im(z)|)² + c
+                z_re.abs_mut();
+                z_im.abs_mut();
+                zr2.assign(z_re.square_ref());
+                zi2.assign(z_im.square_ref());
+                zri.assign(&z_re * &z_im);
+                z_re.assign(&zr2 - &zi2);
+                z_re += &c_re;
+                z_im.assign(&zri << 1u32);
+                z_im += &c_im;
+            }
+            FractalType::Tricorn => {
+                // z = conj(z)² + c = (Re(z)² - Im(z)², -2·Re(z)·Im(z)) + c
+                zr2.assign(z_re.square_ref());
+                zi2.assign(z_im.square_ref());
+                zri.assign(&z_re * &z_im);
+                z_re.assign(&zr2 - &zi2);
+                z_re += &c_re;
+                z_im.assign(&zri << 1u32);
+                z_im.neg_assign(); // negate: conjugation
+                z_im += &c_im;
+            }
+            FractalType::Celtic => {
+                // z² then |Re(z²)|, Im(z²) unchanged
+                zr2.assign(z_re.square_ref());
+                zi2.assign(z_im.square_ref());
+                zri.assign(&z_re * &z_im);
+                z_re.assign(&zr2 - &zi2);
+                z_re.abs_mut(); // Celtic: |Re(z²)|
+                z_re += &c_re;
+                z_im.assign(&zri << 1u32);
+                z_im += &c_im;
+            }
+            FractalType::Perpendicular => {
+                // Re: standard z². Im: -2·|Re(z)|·Im(z)
+                let sign_re = z_re.to_f64() >= 0.0;
+                zr2.assign(z_re.square_ref());
+                zi2.assign(z_im.square_ref());
+                // Im = -2·|Re(z)|·Im(z) = -sign(Re(z))·2·Re(z)·Im(z)
+                zri.assign(&z_re * &z_im);
+                z_re.assign(&zr2 - &zi2);
+                z_re += &c_re;
+                z_im.assign(&zri << 1u32);
+                if sign_re {
+                    z_im.neg_assign();
+                }
+                z_im += &c_im;
+            }
+            FractalType::Buffalo => {
+                // |Re(z²)|, -|Im(z²)|
+                zr2.assign(z_re.square_ref());
+                zi2.assign(z_im.square_ref());
+                zri.assign(&z_re * &z_im);
+                z_re.assign(&zr2 - &zi2);
+                z_re.abs_mut(); // |Re(z²)|
+                z_re += &c_re;
+                z_im.assign(&zri << 1u32);
+                z_im.abs_mut();
+                z_im.neg_assign(); // -|Im(z²)|
+                z_im += &c_im;
+            }
+            _ => {
+                // Standard Mandelbrot / Julia: z = z² + c
+                zr2.assign(z_re.square_ref());
+                zi2.assign(z_im.square_ref());
+                zri.assign(&z_re * &z_im);
+                z_re.assign(&zr2 - &zi2);
+                z_re += &c_re;
+                z_im.assign(&zri << 1u32);
+                z_im += &c_im;
+            }
         }
-    }
-
-    let orbit_len = orbit.len() as u32;
-    PerturbData { orbit, orbit_len }
-}
-
-/// Compute a Julia reference orbit at arbitrary precision.
-/// Same as Mandelbrot but: z₀ = center (not 0), c = julia_c (not center).
-pub fn compute_julia_reference_orbit(
-    center_re: &Float,
-    center_im: &Float,
-    julia_c_re: f64,
-    julia_c_im: f64,
-    max_iter: u32,
-    pixel_step: f64,
-) -> PerturbData {
-    let zoom_digits = if pixel_step > 0.0 {
-        (-pixel_step.log10()).max(16.0) as u32
-    } else {
-        64
-    };
-    let precision = (zoom_digits * 4 + 64).max(128).max(center_re.prec());
-
-    let c_re = Float::with_val(precision, julia_c_re);
-    let c_im = Float::with_val(precision, julia_c_im);
-    // Julia: z₀ = center pixel (not 0)
-    let mut z_re = Float::with_val(precision, center_re);
-    let mut z_im = Float::with_val(precision, center_im);
-
-    let mut zr2 = Float::new(precision);
-    let mut zi2 = Float::new(precision);
-    let mut zri = Float::new(precision);
-
-    let mut orbit = Vec::with_capacity(max_iter as usize + 1);
-    let escape_r2 = 256.0_f64;
-
-    for _ in 0..max_iter {
-        let zr_f64 = z_re.to_f64();
-        let zi_f64 = z_im.to_f64();
-        let zr_hi = zr_f64 as f32;
-        let zr_lo = (zr_f64 - zr_hi as f64) as f32;
-        let zi_hi = zi_f64 as f32;
-        let zi_lo = (zi_f64 - zi_hi as f64) as f32;
-        orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
-
-        zr2.assign(z_re.square_ref());
-        zi2.assign(z_im.square_ref());
-        zri.assign(&z_re * &z_im);
-
-        z_re.assign(&zr2 - &zi2);
-        z_re += &c_re;
-        z_im.assign(&zri << 1u32);
-        z_im += &c_im;
 
         let zr = z_re.to_f64();
         let zi = z_im.to_f64();

@@ -523,10 +523,10 @@ impl GpuState {
         let wg_x = (self.display_width + 15) / 16;
         let wg_y = (self.height + 15) / 16;
 
-        // Determine if we should use perturbation (deep zoom Mandelbrot only)
+        // Determine if we should use perturbation (all escape-time z²+c types at deep zoom)
         let pixel_step = params.pixel_step_x(self.display_width);
-        let use_perturb = (params.fractal_type == crate::fractals::FractalType::Mandelbrot
-            || params.fractal_type == crate::fractals::FractalType::Julia)
+        let use_perturb = params.fractal_type.is_escape_time()
+            && params.fractal_type != crate::fractals::FractalType::Multibrot
             && pixel_step < 1e-7;
         self.using_perturbation = use_perturb;
 
@@ -554,15 +554,16 @@ impl GpuState {
 
             if need_recompute {
                 self.ensure_ref_orbit_capacity(params.max_iter);
-                let perturb_data = if params.fractal_type == crate::fractals::FractalType::Julia {
-                    crate::fractals::compute_julia_reference_orbit(
-                        &params.center_re, &params.center_im,
-                        params.julia_c[0] as f64, params.julia_c[1] as f64,
-                        params.max_iter, pixel_step,
-                    )
+                let julia_c = if params.fractal_type == crate::fractals::FractalType::Julia {
+                    Some((params.julia_c[0] as f64, params.julia_c[1] as f64))
                 } else {
-                    crate::fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step)
+                    None
                 };
+                let perturb_data = crate::fractals::compute_variant_reference_orbit(
+                    &params.center_re, &params.center_im,
+                    params.max_iter, pixel_step,
+                    params.fractal_type, julia_c,
+                );
                 self.queue.write_buffer(
                     &self.ref_orbit_buffer,
                     0,

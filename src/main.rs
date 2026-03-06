@@ -41,8 +41,9 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     if let Some(pos) = args.iter().position(|a| a == "--type") {
         if let Some(name) = args.get(pos + 1) {
             for &ft in FractalType::ALL {
-                if ft.name().to_lowercase().replace(' ', "") == name.to_lowercase().replace(' ', "")
-                    || ft.name().to_lowercase().replace(' ', "_") == name.to_lowercase()
+                let normalized_ft = ft.name().to_lowercase().replace(' ', "");
+                let normalized_input = name.to_lowercase().replace([' ', '-', '_'], "");
+                if normalized_ft == normalized_input
                 {
                     params.fractal_type = ft;
                     params.set_from_default_bounds();
@@ -211,8 +212,8 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
 
     // Perturbation resources
     let pixel_step = params.pixel_step_x(width);
-    let use_perturb = (params.fractal_type == FractalType::Mandelbrot
-        || params.fractal_type == FractalType::Julia)
+    let use_perturb = params.fractal_type.is_escape_time()
+        && params.fractal_type != FractalType::Multibrot
         && pixel_step < 1e-7;
 
     let perturb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -240,15 +241,16 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let ps_mantissa_y = (step_y / ps_scale) as f32;
 
     if use_perturb {
-        let perturb_data = if params.fractal_type == FractalType::Julia {
-            fractals::compute_julia_reference_orbit(
-                &params.center_re, &params.center_im,
-                params.julia_c[0] as f64, params.julia_c[1] as f64,
-                params.max_iter, pixel_step,
-            )
+        let julia_c = if params.fractal_type == FractalType::Julia {
+            Some((params.julia_c[0] as f64, params.julia_c[1] as f64))
         } else {
-            fractals::compute_reference_orbit(&params.center_re, &params.center_im, params.max_iter, pixel_step)
+            None
         };
+        let perturb_data = fractals::compute_variant_reference_orbit(
+            &params.center_re, &params.center_im,
+            params.max_iter, pixel_step,
+            params.fractal_type, julia_c,
+        );
         queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
         let pgpu = PerturbGpuParams { ref_orbit_len: perturb_data.orbit_len, pixel_step_exp: ps_exp, _pad: [0; 2] };
         queue.write_buffer(&perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));

@@ -30,7 +30,6 @@ struct Params {
 
 // ── Double-single arithmetic (for coordinate mapping only) ──────────────────
 // Each value is (hi, lo) where value = hi + lo (~48 bits of mantissa).
-
 fn two_sum(a: f32, b: f32) -> vec2<f32> {
     let s = a + b;
     let v = s - a;

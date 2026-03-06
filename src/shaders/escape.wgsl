@@ -32,6 +32,11 @@ struct Params {
 // ── Double-single arithmetic ─────────────────────────────────────────────────
 // Each value is represented as (hi, lo) where value = hi + lo.
 // This gives ~48 bits of mantissa (vs 23 for plain f32).
+//
+// NOTE: two_sum/two_prod rely on IEEE 754 error-free transformations, but
+// GPU compilers algebraically simplify (a+b)-a → b, making error terms zero.
+// This limits double-single precision to ~f32 (~7 digits) on most GPUs.
+// For deep zoom (>1e-7), use the perturbation shader instead.
 
 // Exact sum: a + b = s + e (Knuth two-sum)
 fn two_sum(a: f32, b: f32) -> vec2<f32> {
