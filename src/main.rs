@@ -341,6 +341,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                 "aurora" => fractals::ColorPalette::Aurora,
                 "storm" => fractals::ColorPalette::Storm,
                 "canopy" | "primordial" => fractals::ColorPalette::Canopy,
+                "bokeh" | "canopy-bokeh" => fractals::ColorPalette::CanopyBokeh,
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();

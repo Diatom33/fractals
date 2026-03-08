@@ -188,6 +188,7 @@ pub enum ColorPalette {
     Aurora,      // 5: Midnight aurora green-violet bands
     Storm,       // 6: Oppressive brass murk with lightning
     Canopy,      // 7: Primordial canopy — orbit trap jewels over golden-green
+    CanopyBokeh, // 8: Canopy with bright bokeh highlights (tone-mapped)
 }
 
 impl ColorPalette {
@@ -200,6 +201,7 @@ impl ColorPalette {
         ColorPalette::Aurora,
         ColorPalette::Storm,
         ColorPalette::Canopy,
+        ColorPalette::CanopyBokeh,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -212,6 +214,7 @@ impl ColorPalette {
             ColorPalette::Aurora => "Midnight Aurora",
             ColorPalette::Storm => "Storm",
             ColorPalette::Canopy => "Primordial Canopy",
+            ColorPalette::CanopyBokeh => "Canopy Bokeh",
         }
     }
 
@@ -225,6 +228,7 @@ impl ColorPalette {
             ColorPalette::Aurora => 5,
             ColorPalette::Storm => 6,
             ColorPalette::Canopy => 7,
+            ColorPalette::CanopyBokeh => 8,
         }
     }
 
@@ -235,13 +239,14 @@ impl ColorPalette {
             ColorPalette::Aurora => 3.0,      // band frequency
             ColorPalette::Storm => 10.0,      // sigmoid steepness
             ColorPalette::Canopy => 3.0,      // trap scale
+            ColorPalette::CanopyBokeh => 3.0, // trap scale (same base)
             _ => 0.0,
         }
     }
 
     /// Whether this palette uses the coloring_param slider.
     pub fn has_param(&self) -> bool {
-        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy)
+        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::CanopyBokeh)
     }
 
     /// Label for the coloring_param slider.
@@ -251,6 +256,7 @@ impl ColorPalette {
             ColorPalette::Aurora => "Band frequency",
             ColorPalette::Storm => "Contrast",
             ColorPalette::Canopy => "Trap scale",
+            ColorPalette::CanopyBokeh => "Trap scale",
             _ => "",
         }
     }
