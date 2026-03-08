@@ -231,23 +231,29 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(nx0, nx1, u.y);
 }
 
-// Fractal Brownian motion with dynamic octave count
-fn fbm_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
+// Ridged multifractal noise — sharp ridges and veins instead of smooth Perlin blobs.
+// Each octave takes abs(noise*2-1) and inverts it, creating sharp creases.
+// Previous octave's value weights the next, concentrating detail in the ridges.
+fn ridged_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
     var total: f32 = 0.0;
-    var amplitude: f32 = 0.5;
+    var amplitude: f32 = 1.0;
     var freq: f32 = 1.0;
-    var max_val: f32 = 0.0;
+    var prev: f32 = 1.0;
     for (var i: i32 = 0; i < num_octaves; i++) {
-        total += amplitude * value_noise(p * freq);
-        max_val += amplitude;
+        var n = value_noise(p * freq);
+        n = 1.0 - abs(n * 2.0 - 1.0);  // sharp ridges at n ≈ 0.5
+        n = n * n;                        // sharpen further
+        total += n * amplitude * prev;
+        prev = n;
         amplitude *= 0.5;
-        freq *= 2.0;
+        freq *= 2.2;  // slightly non-dyadic for less grid alignment
     }
-    return total / max_val;
+    return clamp(total * 0.5, 0.0, 1.0);
 }
 
 // Palette 6: Storm Threshold — dark atmosphere with bright lightning at steep iteration gradients
-fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
+// Noise uses orbit-space coordinates (log|z|, arg(z)) so it's zoom-independent and works in perturbation mode.
+fn palette_storm(smooth_iter: f32, z: vec2<f32>, dz_angle: f32, idx: u32) -> vec3<f32> {
     let steepness = params.coloring_param; // sigmoid steepness
     let stride_val = params.stride;
     let h = params.resolution.y;
@@ -268,21 +274,18 @@ fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
     }
     let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
 
-    // Compute complex-plane coordinates for this pixel (noise moves with fractal)
-    let cx = params.center_hi.x + params.center_lo.x
-           + (f32(px) - f32(params.resolution.x) * 0.5) * params.pixel_step.x;
-    let cy = params.center_hi.y + params.center_lo.y
-           + (f32(py) - f32(params.resolution.y) * 0.5) * params.pixel_step.y;
-    let complex_pos = vec2<f32>(cx, cy);
+    // Orbit-space noise coordinates — zoom-independent, works in perturbation mode.
+    // log|z| gives radial distance in orbit space, arg(z) gives angular position.
+    // These are intrinsic to the fractal geometry and don't depend on pixel_step.
+    let z_len = max(length(z), 1e-10);
+    let log_r = log2(z_len);
+    let angle = atan2(z.y, z.x);
+    let noise_pos = vec2<f32>(log_r * 0.8, angle * 1.5);
 
-    // Dynamic octaves: more detail as zoom increases (pixel_step decreases)
-    let octaves = clamp(i32(floor(-log2(params.pixel_step.x)) - 5.0), 3, 12);
+    // Octaves scale with iteration count — deeper zoom = higher iters = more detail
+    let octaves = clamp(i32(log2(smooth_iter + 1.0)) + 1, 3, 10);
 
-    // fBm noise at complex-plane coords with base frequency ~1.5
-    // At default view (~3.5 units wide), this gives ~3-5 noise patches
-    let noise_val = fbm_noise(complex_pos * 1.5, octaves);
-
-    // Soft threshold: lightning fades in/out smoothly at noise boundaries
+    let noise_val = ridged_noise(noise_pos, octaves);
     let mask = smoothstep(0.3, 0.7, noise_val);
 
     // Sigmoid contrast on base value
@@ -301,7 +304,7 @@ fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
     let glow_mask = mix(0.3, 1.0, mask);
     let glow_color = vec3<f32>(0.25, 0.12, 0.40);
 
-    // Lightning: bright blue-white only at very steep gradients, fully masked by fBm
+    // Lightning: bright blue-white only at very steep gradients, fully masked by ridged noise
     let lightning = smoothstep(1.5, 4.0, grad_mag) * mask;
     let bolt = vec3<f32>(0.90, 0.90, 1.0);
 
@@ -380,6 +383,9 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
 
     for (var dy: i32 = -4; dy <= 4; dy++) {
         for (var dx: i32 = -4; dx <= 4; dx++) {
+            let dist_sq = f32(dx * dx + dy * dy);
+            if dist_sq > 20.25 { continue; }  // circular radius 4.5
+
             let nx = i32(px) + dx;
             let ny = i32(py) + dy;
             if nx < 1 || nx >= i32(w) - 1 || ny < 1 || ny >= i32(h) - 1 { continue; }
@@ -387,7 +393,6 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
             let n_neighbor = iterations[base_off + u32(ny) * stride_val + u32(nx)];
             if n_neighbor >= max_iter_f { continue; }
 
-            // Neighbor's gradient magnitude (emitter signal)
             let ngx = iterations[base_off + u32(ny) * stride_val + u32(nx + 1)]
                     - iterations[base_off + u32(ny) * stride_val + u32(nx - 1)];
             let ngy = iterations[base_off + (u32(ny) + 1u) * stride_val + u32(nx)]
@@ -396,7 +401,7 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
 
             if n_emit < 0.1 { continue; }
 
-            let dist_val = sqrt(f32(dx * dx + dy * dy));
+            let dist_val = sqrt(dist_sq);
             let depth_diff = abs(n - n_neighbor);
             let depth_w = exp(-depth_diff / sigma_depth);
 
@@ -410,22 +415,24 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
 
     let glow_norm = 0.008;
 
-    // Direct emission: bioluminescent cyan-green, hue varies with depth
+    // Direct emission: hue shifts with iteration depth — different "species" at different depths.
+    // Green dominates at moderate depth, blue-violet at deep, cyan-teal at shallow.
     let log_iter = log2(n + 1.0);
-    let hue_phase = log_iter * 0.25;
+    let emit_intensity = smoothstep(0.2, 2.5, self_emitter);
+    let species_phase = log_iter * 0.4;
     let emit_color = vec3<f32>(
-        0.05 + 0.05 * sin(hue_phase + 2.0),
-        0.7 + 0.2 * sin(hue_phase),
-        0.5 + 0.15 * cos(hue_phase)
+        0.04 + 0.08 * max(sin(species_phase + 3.5), 0.0),  // faint warm at some depths
+        0.3 + 0.55 * (0.5 + 0.5 * cos(species_phase)),      // green peaks periodically
+        0.3 + 0.45 * (0.5 + 0.5 * sin(species_phase))       // blue peaks offset from green
     );
 
-    let direct = emit_color * smoothstep(0.2, 2.5, self_emitter);
+    let direct = emit_color * emit_intensity;
 
     // Scattered glow (wavelength-shifted: green center, blue edges)
     let scattered = vec3<f32>(
-        glow_r * glow_norm * 0.2,
-        glow_g * glow_norm * 0.8,
-        glow_b * glow_norm * 0.5
+        glow_r * glow_norm * 0.15,
+        glow_g * glow_norm * 0.7,
+        glow_b * glow_norm * 0.55
     );
 
     // Beer-Lambert depth attenuation (wavelength-dependent)
@@ -451,7 +458,7 @@ fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, dz_mag: f32, dz_a
         case 3u: { return palette_mono(smooth_iter); }
         case 4u: { return palette_thin_film(smooth_iter, z, dz_mag, dz_angle); }
         case 5u: { return palette_aurora(smooth_iter); }
-        case 6u: { return palette_storm(smooth_iter, idx); }
+        case 6u: { return palette_storm(smooth_iter, z, dz_angle, idx); }
         case 7u: { return palette_canopy(smooth_iter, idx); }
         case 8u: { return palette_biolum(smooth_iter, idx); }
         default: { return palette_classic(smooth_iter); }
