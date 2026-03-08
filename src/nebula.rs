@@ -16,6 +16,8 @@ pub struct NebulaExportConfig {
     pub max_iter_b: u32,
     pub output_path: String,
     pub batch_size: u32,
+    pub view_min: [f32; 2],
+    pub view_max: [f32; 2],
 }
 
 /// Shared progress state between the export thread and the UI.
@@ -39,6 +41,15 @@ impl NebulaProgress {
             result_path: Mutex::new(None),
         }
     }
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{}{}", home, &path[1..]);
+        }
+    }
+    path.to_string()
 }
 
 /// Align width so bytes_per_row (width * 4) is a multiple of 256.
@@ -96,6 +107,13 @@ fn run_nebula_export_inner(
     progress: &NebulaProgress,
     ctx: &egui::Context,
 ) -> Result<(), String> {
+    // Ensure output directory exists
+    let path = expand_tilde(&config.output_path);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create directory {}: {e}", parent.display()))?;
+    }
+
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -111,6 +129,11 @@ fn run_nebula_export_inner(
         None,
     ))
     .map_err(|e| format!("Failed to create device: {e}"))?;
+
+    // Surface wgpu validation errors instead of just printing to stderr
+    device.on_uncaptured_error(Box::new(|e| {
+        eprintln!("wgpu error: {e}");
+    }));
 
     let width = align_width(config.width);
     let height = config.height;
@@ -204,11 +227,12 @@ fn run_nebula_export_inner(
 
     let workgroups = (threads_per_dispatch + 255) / 256;
 
-    // View bounds: full Mandelbrot region for sampling, same for view
+    // Always sample from the full Mandelbrot escape region
     let sample_min = [-2.5_f32, -1.5];
     let sample_max = [1.0_f32, 1.5];
-    let view_min = sample_min;
-    let view_max = sample_max;
+    // View bounds from config (matches current viewer or full region)
+    let view_min = config.view_min;
+    let view_max = config.view_max;
 
     let repaint_interval = (num_dispatches / 100).max(1);
 
@@ -373,18 +397,6 @@ fn run_nebula_export_inner(
 
     let img = image::RgbaImage::from_raw(config.width, height, pixels)
         .ok_or("Failed to create image from pixel data")?;
-
-    // Expand ~ in path
-    let path = if config.output_path.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy();
-            format!("{}{}", home, &config.output_path[1..])
-        } else {
-            config.output_path.clone()
-        }
-    } else {
-        config.output_path.clone()
-    };
 
     img.save(&path).map_err(|e| format!("Failed to save: {e}"))?;
 

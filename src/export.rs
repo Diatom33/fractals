@@ -37,6 +37,10 @@ pub fn export_headless(
     params.supersampling = config.ss;
 
     let path = expand_tilde(&config.path);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create directory {}: {e}", parent.display()))?;
+    }
     let width = align_width(config.width);
     let height = config.height;
     let out_pixels = (width * height) as u64;

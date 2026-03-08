@@ -126,7 +126,7 @@ impl FractalApp {
             hires_width: 3840,
             hires_height: 2160,
             hires_ss: 2,
-            hires_path: String::from("~/fractal_export.png"),
+            hires_path: String::from("~/Pictures/fractals/fractal_export.png"),
             hires_status: Arc::new(Mutex::new(None)),
             hires_in_progress: Arc::new(AtomicBool::new(false)),
             nebula_width: 1920,
@@ -136,7 +136,7 @@ impl FractalApp {
             nebula_iter_g: 500,
             nebula_iter_b: 50,
             nebula_batch_size: 65536,
-            nebula_path: String::from("~/nebulabrot.png"),
+            nebula_path: String::from("~/Pictures/fractals/nebulabrot.png"),
             nebula_progress: None,
             cursor_complex: None,
             last_display_w: 0,
@@ -656,20 +656,43 @@ impl eframe::App for FractalApp {
                                 egui::Button::new(btn_label),
                             );
                             if render_btn.clicked() {
-                                let num_samples = (self.nebula_samples_m * 1_000_000.0) as u64;
-                                let config = NebulaExportConfig {
-                                    width: self.nebula_width,
-                                    height: self.nebula_height,
-                                    num_samples,
-                                    max_iter_r: self.nebula_iter_r,
-                                    max_iter_g: self.nebula_iter_g,
-                                    max_iter_b: self.nebula_iter_b,
-                                    output_path: self.nebula_path.clone(),
-                                    batch_size: self.nebula_batch_size,
-                                };
-                                let progress = Arc::new(NebulaProgress::new(num_samples));
-                                self.nebula_progress = Some(progress.clone());
-                                crate::nebula::run_nebula_export(config, progress, ctx.clone());
+                                // Compute aspect-correct view bounds from current view
+                                let cx = self.params.center_re.to_f64();
+                                let cy = self.params.center_im.to_f64();
+                                let aspect = self.nebula_width as f64 / self.nebula_height as f64;
+                                let half_y = self.params.half_range_y;
+                                let half_x = half_y * aspect;
+
+                                // Check f32 precision: view range must be representable
+                                let view_range = (2.0 * half_x).min(2.0 * half_y);
+                                if view_range < 1e-5 {
+                                    let progress = Arc::new(NebulaProgress::new(1));
+                                    *progress.error.lock().unwrap() = Some(
+                                        "View too deep for Nebulabrot (f32 precision limit). Zoom out.".to_string()
+                                    );
+                                    progress.finished.store(true, Ordering::SeqCst);
+                                    self.nebula_progress = Some(progress);
+                                } else {
+                                    let view_min = [(cx - half_x) as f32, (cy - half_y) as f32];
+                                    let view_max = [(cx + half_x) as f32, (cy + half_y) as f32];
+
+                                    let num_samples = (self.nebula_samples_m * 1_000_000.0) as u64;
+                                    let config = NebulaExportConfig {
+                                        width: self.nebula_width,
+                                        height: self.nebula_height,
+                                        num_samples,
+                                        max_iter_r: self.nebula_iter_r,
+                                        max_iter_g: self.nebula_iter_g,
+                                        max_iter_b: self.nebula_iter_b,
+                                        output_path: self.nebula_path.clone(),
+                                        batch_size: self.nebula_batch_size,
+                                        view_min,
+                                        view_max,
+                                    };
+                                    let progress = Arc::new(NebulaProgress::new(num_samples));
+                                    self.nebula_progress = Some(progress.clone());
+                                    crate::nebula::run_nebula_export(config, progress, ctx.clone());
+                                }
                             }
 
                             if nebula_running {
