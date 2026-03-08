@@ -2,6 +2,7 @@
 
 use crate::fractals::{FractalParams, FractalType};
 use crate::gpu::GpuState;
+use crate::nebula::{NebulaExportConfig, NebulaProgress};
 use rug::Float;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,6 +70,17 @@ pub struct FractalApp {
     hires_status: Arc<Mutex<Option<String>>>,
     hires_in_progress: Arc<AtomicBool>,
 
+    // Nebulabrot export
+    nebula_width: u32,
+    nebula_height: u32,
+    nebula_samples_m: f64,
+    nebula_iter_r: u32,
+    nebula_iter_g: u32,
+    nebula_iter_b: u32,
+    nebula_batch_size: u32,
+    nebula_path: String,
+    nebula_progress: Option<Arc<NebulaProgress>>,
+
     // Coordinate display
     cursor_complex: Option<(f64, f64)>,
 
@@ -117,6 +129,15 @@ impl FractalApp {
             hires_path: String::from("~/fractal_export.png"),
             hires_status: Arc::new(Mutex::new(None)),
             hires_in_progress: Arc::new(AtomicBool::new(false)),
+            nebula_width: 1920,
+            nebula_height: 1080,
+            nebula_samples_m: 100.0,
+            nebula_iter_r: 5000,
+            nebula_iter_g: 500,
+            nebula_iter_b: 50,
+            nebula_batch_size: 65536,
+            nebula_path: String::from("~/nebulabrot.png"),
+            nebula_progress: None,
             cursor_complex: None,
             last_display_w: 0,
             last_display_h: 0,
@@ -585,6 +606,102 @@ impl eframe::App for FractalApp {
                                 egui::Color32::from_rgb(180, 180, 220)
                             };
                             ui.label(egui::RichText::new(status_msg).small().color(color));
+                        }
+
+                        // ── Nebulabrot Export ────────────────────────────
+                        section_header(ui, "Nebulabrot Export");
+
+                        ui.horizontal(|ui| {
+                            ui.label("Width:");
+                            ui.add(egui::DragValue::new(&mut self.nebula_width).range(64..=15360).speed(16));
+                            ui.label("Height:");
+                            ui.add(egui::DragValue::new(&mut self.nebula_height).range(64..=8640).speed(16));
+                        });
+
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Samples (M):");
+                            ui.add(egui::DragValue::new(&mut self.nebula_samples_m).range(1.0..=10000.0).speed(1.0).max_decimals(0));
+                        });
+
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label("R iters:");
+                            ui.add(egui::DragValue::new(&mut self.nebula_iter_r).range(10..=50000).speed(10));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("G iters:");
+                            ui.add(egui::DragValue::new(&mut self.nebula_iter_g).range(10..=50000).speed(10));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("B iters:");
+                            ui.add(egui::DragValue::new(&mut self.nebula_iter_b).range(10..=50000).speed(10));
+                        });
+
+                        ui.add_space(2.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.nebula_path)
+                                .desired_width(ui.available_width() - 8.0),
+                        );
+
+                        ui.add_space(4.0);
+                        let nebula_running = self.nebula_progress.as_ref()
+                            .map(|p| !p.finished.load(Ordering::Relaxed))
+                            .unwrap_or(false);
+
+                        ui.horizontal(|ui| {
+                            let btn_label = if nebula_running { "Rendering..." } else { "Render Nebulabrot" };
+                            let render_btn = ui.add_enabled(
+                                !nebula_running,
+                                egui::Button::new(btn_label),
+                            );
+                            if render_btn.clicked() {
+                                let num_samples = (self.nebula_samples_m * 1_000_000.0) as u64;
+                                let config = NebulaExportConfig {
+                                    width: self.nebula_width,
+                                    height: self.nebula_height,
+                                    num_samples,
+                                    max_iter_r: self.nebula_iter_r,
+                                    max_iter_g: self.nebula_iter_g,
+                                    max_iter_b: self.nebula_iter_b,
+                                    output_path: self.nebula_path.clone(),
+                                    batch_size: self.nebula_batch_size,
+                                };
+                                let progress = Arc::new(NebulaProgress::new(num_samples));
+                                self.nebula_progress = Some(progress.clone());
+                                crate::nebula::run_nebula_export(config, progress, ctx.clone());
+                            }
+
+                            if nebula_running {
+                                if ui.button("Cancel").clicked() {
+                                    if let Some(p) = &self.nebula_progress {
+                                        p.cancelled.store(true, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        });
+
+                        if let Some(progress) = &self.nebula_progress {
+                            let done = progress.samples_done.load(Ordering::Relaxed);
+                            let total = progress.total_samples.load(Ordering::Relaxed).max(1);
+                            let frac = done as f32 / total as f32;
+
+                            if nebula_running {
+                                ui.add(egui::ProgressBar::new(frac).text(format!("{:.1}%", frac * 100.0)));
+                                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                            }
+
+                            if progress.finished.load(Ordering::Relaxed) {
+                                if let Some(err) = progress.error.lock().unwrap().as_ref() {
+                                    if err == "Cancelled" {
+                                        ui.label(egui::RichText::new("Cancelled").small().color(egui::Color32::from_rgb(255, 200, 100)));
+                                    } else {
+                                        ui.label(egui::RichText::new(format!("ERROR: {err}")).small().color(egui::Color32::from_rgb(255, 120, 120)));
+                                    }
+                                } else if let Some(path) = progress.result_path.lock().unwrap().as_ref() {
+                                    ui.label(egui::RichText::new(format!("Saved: {path}")).small().color(egui::Color32::from_rgb(120, 255, 120)));
+                                }
+                            }
                         }
                     });
             });

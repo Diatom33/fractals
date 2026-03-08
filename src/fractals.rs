@@ -239,7 +239,7 @@ impl ColorPalette {
             ColorPalette::Aurora => 3.0,      // band frequency
             ColorPalette::Storm => 10.0,      // sigmoid steepness
             ColorPalette::Canopy => 3.0,      // trap scale
-            ColorPalette::CanopyBokeh => 3.0, // trap scale (same base)
+            ColorPalette::CanopyBokeh => 3.0,  // trap scale
             _ => 0.0,
         }
     }
