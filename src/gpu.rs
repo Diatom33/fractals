@@ -130,7 +130,7 @@ impl GpuState {
         });
         let final_z_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("final_z"),
-            size: out_pixels * 8, // vec2<f32> per pixel
+            size: out_pixels * 16, // vec4<f32> per pixel (z.xy, dz_mag, 0)
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -400,7 +400,7 @@ impl GpuState {
             });
             self.final_z_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("final_z"),
-                size: out_pixels * 8,
+                size: out_pixels * 16,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });

@@ -27,7 +27,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> iterations: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;
-@group(0) @binding(3) var<storage, read> final_z: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> final_z: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> roots: array<vec2<f32>>;
 
 // -- Oklab to linear sRGB ---------------------------------------------------
@@ -99,12 +99,18 @@ fn palette_mono(smooth_iter: f32) -> vec3<f32> {
 }
 
 // Palette 4: Thin-Film Interference
-fn palette_thin_film(smooth_iter: f32, z: vec2<f32>) -> vec3<f32> {
+fn palette_thin_film(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32) -> vec3<f32> {
     let k = params.coloring_param;
     let log_iter = log2(smooth_iter + 1.0);
     let t_base = sqrt(log_iter * 0.5);
-    let angle = atan2(z.y, z.x);
-    let viewing = abs(cos(angle * k));
+
+    var viewing: f32;
+    if dz_mag > 0.0 {
+        viewing = abs(cos(dz_angle * k));
+    } else {
+        let angle = atan2(z.y, z.x);
+        viewing = abs(cos(angle * k));
+    }
     let t_eff = t_base / max(viewing, 0.04);
 
     let pi = 3.14159265;
@@ -122,48 +128,74 @@ fn palette_aurora(smooth_iter: f32) -> vec3<f32> {
     let glow = smoothstep(0.3, 0.48, band) * (1.0 - smoothstep(0.52, 0.7, band));
     let band2 = fract(log_iter * freq * 0.08 + 0.5);
     let glow2 = smoothstep(0.35, 0.48, band2) * (1.0 - smoothstep(0.52, 0.65, band2)) * 0.3;
-    let hue_t = fract(log_iter * 0.07);
-    let green = vec3<f32>(0.05, 0.9, 0.25);
-    let teal = vec3<f32>(0.05, 0.7, 0.6);
-    let violet = vec3<f32>(0.4, 0.08, 0.8);
-    let pink = vec3<f32>(0.7, 0.1, 0.5);
-    var base_color: vec3<f32>;
-    if hue_t < 0.33 {
-        base_color = mix(green, teal, smoothstep(0.0, 0.33, hue_t));
-    } else if hue_t < 0.66 {
-        base_color = mix(teal, violet, smoothstep(0.33, 0.66, hue_t));
-    } else {
-        base_color = mix(violet, pink, smoothstep(0.66, 1.0, hue_t));
-    }
-    let hue_t2 = fract(log_iter * 0.07 + 0.4);
-    var sec_color: vec3<f32>;
-    if hue_t2 < 0.5 {
-        sec_color = mix(teal, violet, smoothstep(0.0, 0.5, hue_t2));
-    } else {
-        sec_color = mix(violet, green, smoothstep(0.5, 1.0, hue_t2));
-    }
+
+    let hue_angle = log_iter * 0.44;
+    let base_color = vec3<f32>(
+        0.22 + 0.25 * cos(hue_angle - 4.0),
+        0.45 + 0.45 * cos(hue_angle),
+        0.42 + 0.40 * cos(hue_angle - 2.5)
+    );
+    let hue_angle2 = log_iter * 0.44 + 2.5;
+    let sec_color = vec3<f32>(
+        0.15 + 0.15 * cos(hue_angle2 - 4.0),
+        0.35 + 0.35 * cos(hue_angle2),
+        0.35 + 0.30 * cos(hue_angle2 - 2.5)
+    );
+
     let dark = vec3<f32>(0.008, 0.006, 0.02);
     let primary = mix(dark, base_color, glow);
     return primary + sec_color * glow2;
 }
 
-// Palette 6: Storm Threshold (gradient-based lightning not available in median mode — simplified)
-fn palette_storm(smooth_iter: f32) -> vec3<f32> {
+/// Palette 6: Storm Threshold — gradient-based lightning using sample 0 iterations for neighbors
+fn palette_storm(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     let steepness = params.coloring_param;
+    let stride_val = params.stride;
+    let h = params.resolution.y;
+
+    // Gradient from sample 0's iteration values at neighboring pixels
+    var grad_x: f32 = 0.0;
+    var grad_y: f32 = 0.0;
+    if px > 0u && px < params.resolution.x - 1u {
+        grad_x = iterations[py * stride_val + px + 1u]
+               - iterations[py * stride_val + px - 1u];
+    }
+    if py > 0u && py < h - 1u {
+        grad_y = iterations[(py + 1u) * stride_val + px]
+               - iterations[(py - 1u) * stride_val + px];
+    }
+    let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
+
     let log_iter = log2(smooth_iter + 1.0);
-    let x_val = fract(log_iter * 0.1);
+    let x_val = fract(log_iter * 0.06);
     let v = 1.0 / (1.0 + exp(-steepness * (x_val - 0.5)));
-    return hsv_to_rgb(40.0 / 360.0, 0.18 + 0.12 * v, 0.12 + 0.18 * v);
+
+    // Visible base: storm blue → steel grey → bronze
+    let hue = 220.0 / 360.0 + 0.08 * v;
+    let sat = 0.40 - 0.15 * v;
+    let val = 0.12 + 0.22 * v;
+    let base = hsv_to_rgb(hue, sat, val);
+
+    // Edge glow: dim purple at genuinely steep gradients
+    let edge_glow = smoothstep(0.5, 2.0, grad_mag);
+    let glow_color = vec3<f32>(0.25, 0.12, 0.40);
+
+    // Lightning: bright blue-white only at very steep gradients
+    let lightning = smoothstep(1.5, 4.0, grad_mag);
+    let bolt = vec3<f32>(0.90, 0.90, 1.0);
+
+    let with_glow = mix(base, glow_color, edge_glow);
+    return mix(with_glow, bolt, lightning);
 }
 
-fn escape_color(smooth_iter: f32, z: vec2<f32>) -> vec3<f32> {
+fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: u32, py: u32) -> vec3<f32> {
     switch params.palette {
         case 1u: { return palette_oklab(smooth_iter); }
         case 2u: { return palette_smooth(smooth_iter); }
         case 3u: { return palette_mono(smooth_iter); }
-        case 4u: { return palette_thin_film(smooth_iter, z); }
+        case 4u: { return palette_thin_film(smooth_iter, z, dz_mag, dz_angle); }
         case 5u: { return palette_aurora(smooth_iter); }
-        case 6u: { return palette_storm(smooth_iter); }
+        case 6u: { return palette_storm(smooth_iter, px, py); }
         default: { return palette_classic(smooth_iter); }
     }
 }
@@ -268,14 +300,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Color the median iteration value
+    let fz = final_z[idx];
+    let z = fz.xy;
+    let dz_mag = fz.z;
+    let dz_angle = fz.w;
     var color: vec3<f32>;
     if params.color_mode == 1u {
-        // Root-basin coloring: use final_z from last sample for root assignment
-        let z = final_z[idx];
         color = basin_color(median_iter, z, params.num_roots);
     } else {
-        let z = final_z[idx];
-        color = escape_color(median_iter, z);
+        color = escape_color(median_iter, z, dz_mag, dz_angle, x, y);
     }
 
     // Composite with interior coverage

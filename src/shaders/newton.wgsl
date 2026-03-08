@@ -25,7 +25,7 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> iterations: array<f32>;
-@group(0) @binding(2) var<storage, read_write> final_z: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> final_z: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> roots: array<vec2<f32>>;
 
 // ── Double-single arithmetic (for coordinate mapping only) ──────────────────
@@ -238,5 +238,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
     iterations[iter_idx] = iter;
-    final_z[idx] = z;
+    final_z[idx] = vec4<f32>(z.x, z.y, 0.0, 0.0);
 }

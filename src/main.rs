@@ -185,7 +185,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     });
     let z_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: out_pixels * 8, // vec2<f32> per pixel
+        size: out_pixels * 16, // vec4<f32> per pixel (z.xy, dz_mag, 0)
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });

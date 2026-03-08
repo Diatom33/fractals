@@ -47,7 +47,7 @@ struct PerturbParams {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> iterations: array<f32>;
-@group(0) @binding(2) var<storage, read_write> final_z: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> final_z: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> ref_orbit: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> perturb: PerturbParams;
 
@@ -131,16 +131,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         var deff_m = dn_m;
 
         if ft == 2u {
-            // Burning Ship: Z_eff = (|Re(Z)|, |Im(Z)|), δ_eff sign-adjusted
-            let sr = signf(Zn_re_hi);
-            let si = signf(Zn_im_hi);
-            Zeff_re_hi = abs(Zn_re_hi);
-            Zeff_im_hi = abs(Zn_im_hi);
+            // Burning Ship: use sign of FULL z (Z + delta), not just reference Z.
+            // Critical after rebasing (Z=0, delta=z_full) and near fold lines.
+            let dn_real_pre = ldexp_v2(dn_m, dn_e);
+            let sr = signf(Zn_re_hi + dn_real_pre.x);
+            let si = signf(Zn_im_hi + dn_real_pre.y);
+            Zeff_re_hi = sr * Zn_re_hi;
+            Zeff_im_hi = si * Zn_im_hi;
             Zeff_re_lo = sr * Zn_re_lo;
             Zeff_im_lo = si * Zn_im_lo;
             deff_m = vec2<f32>(sr * dn_m.x, si * dn_m.y);
         } else if ft == 7u {
-            // Tricorn: Z_eff = conj(Z), δ_eff = conj(δ)
+            // Tricorn: Z_eff = conj(Z), δ_eff = conj(δ) — always negate imag
             Zeff_im_hi = -Zn_im_hi;
             Zeff_im_lo = -Zn_im_lo;
             deff_m = vec2<f32>(dn_m.x, -dn_m.y);
@@ -258,12 +260,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
     iterations[iter_idx] = smooth_val;
 
-    // Store final z for coloring
+    // Store final z for coloring (dz_mag=0 — derivative tracking not available in perturbation mode)
     let dn_out = ldexp_v2(dn_m, dn_e);
     if ref_i < ref_len {
         let Zn_o = ref_orbit[ref_i];
-        final_z[idx] = vec2<f32>(Zn_o.x, Zn_o.y) + dn_out;
+        let zf = vec2<f32>(Zn_o.x, Zn_o.y) + dn_out;
+        final_z[idx] = vec4<f32>(zf.x, zf.y, 0.0, 0.0);
     } else {
-        final_z[idx] = dn_out;
+        final_z[idx] = vec4<f32>(dn_out.x, dn_out.y, 0.0, 0.0);
     }
 }

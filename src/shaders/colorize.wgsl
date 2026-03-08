@@ -31,7 +31,7 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> iterations: array<f32>;
-@group(0) @binding(2) var<storage, read> final_z: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> final_z: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> accum: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> roots: array<vec2<f32>>;
 
@@ -143,13 +143,22 @@ fn palette_mono(smooth_iter: f32) -> vec3<f32> {
 }
 
 // Palette 4: Thin-Film Interference (soap bubble / oil slick)
-// Maps smooth_iter to "optical thickness", modulates by arg(z_final) for iridescent swirl.
-fn palette_thin_film(smooth_iter: f32, z: vec2<f32>) -> vec3<f32> {
+// Maps smooth_iter to "optical thickness", modulates by derivative angle for band-free directional iridescence.
+// arg(dz) is smooth across iteration boundaries (unlike arg(z) which doubles each iteration).
+fn palette_thin_film(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32) -> vec3<f32> {
     let k = params.coloring_param; // angular lobe count
     let log_iter = log2(smooth_iter + 1.0);
     let t_base = sqrt(log_iter * 0.5);
-    let angle = atan2(z.y, z.x);
-    let viewing = abs(cos(angle * k));
+
+    // Use derivative angle for directional bands (smooth, no iteration banding)
+    // Falls back to arg(z) when derivative not available (perturbation/Newton)
+    var viewing: f32;
+    if dz_mag > 0.0 {
+        viewing = abs(cos(dz_angle * k));
+    } else {
+        let angle = atan2(z.y, z.x);
+        viewing = abs(cos(angle * k));
+    }
     let t_eff = t_base / max(viewing, 0.04);
 
     let pi = 3.14159265;
@@ -160,6 +169,7 @@ fn palette_thin_film(smooth_iter: f32, z: vec2<f32>) -> vec3<f32> {
 }
 
 // Palette 5: Midnight Aurora — narrow luminous green-violet bands on dark background
+// Uses smooth cosine-based color cycling to avoid discontinuities.
 fn palette_aurora(smooth_iter: f32) -> vec3<f32> {
     let freq = params.coloring_param; // band frequency
     let log_iter = log2(smooth_iter + 1.0);
@@ -172,29 +182,21 @@ fn palette_aurora(smooth_iter: f32) -> vec3<f32> {
     let band2 = fract(log_iter * freq * 0.08 + 0.5);
     let glow2 = smoothstep(0.35, 0.48, band2) * (1.0 - smoothstep(0.52, 0.65, band2)) * 0.3;
 
-    // Cycle through green → teal → violet → pink using iteration
-    let hue_t = fract(log_iter * 0.07);
-    let green = vec3<f32>(0.05, 0.9, 0.25);
-    let teal = vec3<f32>(0.05, 0.7, 0.6);
-    let violet = vec3<f32>(0.4, 0.08, 0.8);
-    let pink = vec3<f32>(0.7, 0.1, 0.5);
-    var base_color: vec3<f32>;
-    if hue_t < 0.33 {
-        base_color = mix(green, teal, smoothstep(0.0, 0.33, hue_t));
-    } else if hue_t < 0.66 {
-        base_color = mix(teal, violet, smoothstep(0.33, 0.66, hue_t));
-    } else {
-        base_color = mix(violet, pink, smoothstep(0.66, 1.0, hue_t));
-    }
+    // Smooth cosine-based color cycling — no if/else discontinuities
+    let hue_angle = log_iter * 0.44; // ~0.07 * 2π
+    let base_color = vec3<f32>(
+        0.22 + 0.25 * cos(hue_angle - 4.0),   // red channel: peaks at pink/violet
+        0.45 + 0.45 * cos(hue_angle),           // green: peaks at green/teal
+        0.42 + 0.40 * cos(hue_angle - 2.5)     // blue: peaks at teal/violet
+    );
 
-    // Secondary bands get a different hue (shifted)
-    let hue_t2 = fract(log_iter * 0.07 + 0.4);
-    var sec_color: vec3<f32>;
-    if hue_t2 < 0.5 {
-        sec_color = mix(teal, violet, smoothstep(0.0, 0.5, hue_t2));
-    } else {
-        sec_color = mix(violet, green, smoothstep(0.5, 1.0, hue_t2));
-    }
+    // Secondary hue (shifted phase)
+    let hue_angle2 = log_iter * 0.44 + 2.5;
+    let sec_color = vec3<f32>(
+        0.15 + 0.15 * cos(hue_angle2 - 4.0),
+        0.35 + 0.35 * cos(hue_angle2),
+        0.35 + 0.30 * cos(hue_angle2 - 2.5)
+    );
 
     // Dark midnight base — slightly blue-tinted
     let dark = vec3<f32>(0.008, 0.006, 0.02);
@@ -202,7 +204,7 @@ fn palette_aurora(smooth_iter: f32) -> vec3<f32> {
     return primary + sec_color * glow2;
 }
 
-// Palette 6: Storm Threshold — oppressive brass murk with lightning at steep gradients
+// Palette 6: Storm Threshold — dark atmosphere with bright lightning at steep iteration gradients
 fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
     let steepness = params.coloring_param; // sigmoid steepness
     let stride_val = params.stride;
@@ -224,28 +226,36 @@ fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
     }
     let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
 
-    // Sigmoid contrast crush on base value
+    // Sigmoid contrast on base value
     let log_iter = log2(smooth_iter + 1.0);
-    let x_val = fract(log_iter * 0.1);
+    let x_val = fract(log_iter * 0.06);
     let v = 1.0 / (1.0 + exp(-steepness * (x_val - 0.5)));
 
-    // Brass/ash base: warm neutral, low saturation, mostly dark
-    let brass = hsv_to_rgb(40.0 / 360.0, 0.18 + 0.12 * v, 0.12 + 0.18 * v);
+    // Visible base: storm blue → steel grey → bronze
+    let hue = 220.0 / 360.0 + 0.08 * v;
+    let sat = 0.40 - 0.15 * v;
+    let val = 0.12 + 0.22 * v;
+    let base = hsv_to_rgb(hue, sat, val);
 
-    // Lightning: gradient magnitude above threshold → near-white blue-violet
-    let lightning = smoothstep(1.0, 3.0, grad_mag);
-    let bolt = vec3<f32>(0.88, 0.88, 1.0);
+    // Edge glow: dim purple at genuinely steep gradients
+    let edge_glow = smoothstep(0.5, 2.0, grad_mag);
+    let glow_color = vec3<f32>(0.25, 0.12, 0.40);
 
-    return mix(brass, bolt, lightning);
+    // Lightning: bright blue-white only at very steep gradients
+    let lightning = smoothstep(1.5, 4.0, grad_mag);
+    let bolt = vec3<f32>(0.90, 0.90, 1.0);
+
+    let with_glow = mix(base, glow_color, edge_glow);
+    return mix(with_glow, bolt, lightning);
 }
 
 // Dispatch to selected palette (returns sRGB)
-fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, idx: u32) -> vec3<f32> {
+fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
     switch params.palette {
         case 1u: { return palette_oklab(smooth_iter); }
         case 2u: { return palette_smooth(smooth_iter); }
         case 3u: { return palette_mono(smooth_iter); }
-        case 4u: { return palette_thin_film(smooth_iter, z); }
+        case 4u: { return palette_thin_film(smooth_iter, z, dz_mag, dz_angle); }
         case 5u: { return palette_aurora(smooth_iter); }
         case 6u: { return palette_storm(smooth_iter, idx); }
         default: { return palette_classic(smooth_iter); }
@@ -301,7 +311,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_iter = f32(params.max_iter);
     let iter_idx = params.sample_index * params.stride * h + idx;
     let smooth_iter = iterations[iter_idx];
-    let z = final_z[idx];
+    let fz = final_z[idx];
+    let z = fz.xy;
+    let dz_mag = fz.z;
+    let dz_angle = fz.w;
     let wt = params.sample_weight;
     let prev = accum[idx];
 
@@ -316,7 +329,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Exterior sample: compute color, convert to Oklab for perceptually uniform averaging
     var srgb_color: vec3<f32>;
     if params.color_mode == 0u {
-        srgb_color = escape_color(smooth_iter, max_iter, z, idx);
+        srgb_color = escape_color(smooth_iter, max_iter, z, dz_mag, dz_angle, idx);
     } else {
         srgb_color = basin_color(smooth_iter, z, max_iter, params.num_roots);
     }

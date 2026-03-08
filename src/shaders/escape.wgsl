@@ -27,7 +27,7 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> iterations: array<f32>;
-@group(0) @binding(2) var<storage, read_write> final_z: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> final_z: array<vec4<f32>>;
 
 // ── Double-single arithmetic ─────────────────────────────────────────────────
 // Each value is represented as (hi, lo) where value = hi + lo.
@@ -191,10 +191,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_i = params.max_iter;
     var iter: u32 = max_i;
 
+    // Derivative tracking: dz/dc (Mandelbrot-like) or dz/dz₀ (Julia)
+    // Used for smooth modulation in coloring (eliminates iteration banding)
+    let is_julia = params.fractal_type == 1u;
+    var dz_r: f32 = select(0.0, 1.0, is_julia);
+    var dz_i: f32 = 0.0;
+    let dz_offset = select(1.0, 0.0, is_julia);
+
     // Multibrot power (only used when fractal_type == 3)
     let multibrot_d = u32(params.power);
 
     for (var i: u32 = 0u; i < max_i; i++) {
+
+        // Derivative update: dz' = 2*z*dz + offset (before z is modified)
+        // Skip for Multibrot (d != 2, formula is d*z^(d-1)*dz which needs cpow)
+        if params.fractal_type != 3u {
+            let pzr = zr.x;
+            let pzi = zi.x;
+            let new_dr = 2.0 * (pzr * dz_r - pzi * dz_i) + dz_offset;
+            let new_di = 2.0 * (pzr * dz_i + pzi * dz_r);
+            dz_r = new_dr;
+            dz_i = new_di;
+        }
 
         // ── Multibrot (type 3): z = z^d + c using ds_cpow_int ───────────
         if params.fractal_type == 3u {
@@ -277,5 +295,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
     iterations[iter_idx] = smooth_val;
-    final_z[idx] = vec2<f32>(zr.x, zi.x);
+    let dz_mag = sqrt(dz_r * dz_r + dz_i * dz_i);
+    let dz_angle = atan2(dz_i, dz_r);
+    final_z[idx] = vec4<f32>(zr.x, zi.x, dz_mag, dz_angle);
 }
