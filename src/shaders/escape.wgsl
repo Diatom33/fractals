@@ -28,6 +28,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> iterations: array<f32>;
 @group(0) @binding(2) var<storage, read_write> final_z: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> orbit_traps: array<vec4<f32>>;
 
 // ── Double-single arithmetic ─────────────────────────────────────────────────
 // Each value is represented as (hi, lo) where value = hi + lo.
@@ -162,6 +163,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pixel_r = ds_add(vec2<f32>(params.center_hi.x, params.center_lo.x), dx);
     let pixel_i = ds_add(vec2<f32>(params.center_hi.y, params.center_lo.y), dy);
 
+    // Orbit trap points for Canopy palette
+    let trap0 = vec2<f32>(0.0, 0.0);
+    let trap1 = vec2<f32>(1.0, 0.0);
+    let trap2 = vec2<f32>(-0.5, 0.866);
+    let trap3 = vec2<f32>(-0.5, -0.866);
+    var trap_min = vec4<f32>(1e20, 1e20, 1e20, 1e20);
+
     // ── Double-single iteration for Mandelbrot / Julia / Burning Ship / Multibrot ──
 
     var zr: vec2<f32>;
@@ -271,6 +279,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             zi = ds_add(two_zri, ci);
         }
 
+        // Orbit trap distances (use hi part only — sufficient for trap proximity)
+        let z_pos = vec2<f32>(zr.x, zi.x);
+        trap_min.x = min(trap_min.x, length(z_pos - trap0));
+        trap_min.y = min(trap_min.y, length(z_pos - trap1));
+        trap_min.z = min(trap_min.z, length(z_pos - trap2));
+        trap_min.w = min(trap_min.w, length(z_pos - trap3));
+
         // Escape test (f32 is sufficient for |z|² > 256)
         if zr.x * zr.x + zi.x * zi.x > escape_r2 {
             iter = i;
@@ -298,4 +313,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dz_mag = sqrt(dz_r * dz_r + dz_i * dz_i);
     let dz_angle = atan2(dz_i, dz_r);
     final_z[idx] = vec4<f32>(zr.x, zi.x, dz_mag, dz_angle);
+    orbit_traps[idx] = trap_min;
 }

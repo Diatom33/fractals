@@ -27,6 +27,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> iterations: array<f32>;
 @group(0) @binding(2) var<storage, read_write> final_z: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> roots: array<vec2<f32>>;
+@group(0) @binding(4) var<storage, read_write> orbit_traps: array<vec4<f32>>;
 
 // ── Double-single arithmetic (for coordinate mapping only) ──────────────────
 // Each value is (hi, lo) where value = hi + lo (~48 bits of mantissa).
@@ -176,6 +177,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    // Orbit trap points for Canopy palette
+    let trap0 = vec2<f32>(0.0, 0.0);
+    let trap1 = vec2<f32>(1.0, 0.0);
+    let trap2 = vec2<f32>(-0.5, 0.866);
+    let trap3 = vec2<f32>(-0.5, -0.866);
+    var trap_min = vec4<f32>(1e20, 1e20, 1e20, 1e20);
+
     let tol: f32 = 1e-6;
     let tol2 = tol * tol;
     var iter: f32 = f32(max_i);
@@ -192,6 +200,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let num = 2.0 * z3 + vec2<f32>(1.0, 0.0);
             let den = 3.0 * z2;
             let z_new = cdiv(num, den);
+
+            trap_min.x = min(trap_min.x, length(z_new - trap0));
+            trap_min.y = min(trap_min.y, length(z_new - trap1));
+            trap_min.z = min(trap_min.z, length(z_new - trap2));
+            trap_min.w = min(trap_min.w, length(z_new - trap3));
 
             let delta = z_new - z;
             let step_mag2 = cmag2(delta);
@@ -217,6 +230,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let step_val = cdiv(ff[0], ff[1]);
             let z_new = z - relax * step_val + nova_c;
 
+            trap_min.x = min(trap_min.x, length(z_new - trap0));
+            trap_min.y = min(trap_min.y, length(z_new - trap1));
+            trap_min.z = min(trap_min.z, length(z_new - trap2));
+            trap_min.w = min(trap_min.w, length(z_new - trap3));
+
             let delta = z_new - z;
             let step_mag2 = cmag2(delta);
 
@@ -239,4 +257,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
     iterations[iter_idx] = iter;
     final_z[idx] = vec4<f32>(z.x, z.y, 0.0, 0.0);
+    orbit_traps[idx] = trap_min;
 }

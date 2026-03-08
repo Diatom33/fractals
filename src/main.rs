@@ -340,6 +340,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                 "thinfilm" | "thin-film" | "film" => fractals::ColorPalette::ThinFilm,
                 "aurora" => fractals::ColorPalette::Aurora,
                 "storm" => fractals::ColorPalette::Storm,
+                "canopy" | "primordial" => fractals::ColorPalette::Canopy,
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();
@@ -445,6 +446,12 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let z_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: out_pixels * 16, // vec4<f32> per pixel (z.xy, dz_mag, 0)
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let orbit_trap_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: out_pixels * 16, // vec4<f32> per pixel (min dist to 4 trap points)
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -557,7 +564,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     // Escape pipeline
     let esc_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false)],
+        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, false)],
     });
     let esc_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
@@ -572,13 +579,13 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let esc_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &esc_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &orbit_trap_buf)],
     });
 
     // Perturbation pipeline
     let perturb_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_uniform(4)],
+        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_uniform(4), bgl_storage(5, false)],
     });
     let perturb_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
@@ -593,13 +600,13 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let perturb_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &perturb_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &ref_orbit_buf), be!(4, &perturb_params_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &ref_orbit_buf), be!(4, &perturb_params_buf), be!(5, &orbit_trap_buf)],
     });
 
     // Newton pipeline
     let new_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true)],
+        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_storage(4, false)],
     });
     let new_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
@@ -614,13 +621,13 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let new_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &new_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &roots_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &roots_buf), be!(4, &orbit_trap_buf)],
     });
 
     // Colorize pipeline (now writes to accum buffer instead of output)
     let col_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, true), bgl_storage(3, false), bgl_storage(4, true)],
+        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, true), bgl_storage(3, false), bgl_storage(4, true), bgl_storage(5, true)],
     });
     let col_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
@@ -635,7 +642,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let col_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &col_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &accum_buf), be!(4, &roots_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &accum_buf), be!(4, &roots_buf), be!(5, &orbit_trap_buf)],
     });
 
     // Finalize pipeline
@@ -662,7 +669,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     // Median finalize pipeline (params, iterations, output, final_z, roots)
     let med_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false), bgl_storage(3, true), bgl_storage(4, true)],
+        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false), bgl_storage(3, true), bgl_storage(4, true), bgl_storage(5, true)],
     });
     let med_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
@@ -677,7 +684,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let med_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &med_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &out_buf), be!(3, &z_buf), be!(4, &roots_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &out_buf), be!(3, &z_buf), be!(4, &roots_buf), be!(5, &orbit_trap_buf)],
     });
 
     let wg_x = (width + 15) / 16;

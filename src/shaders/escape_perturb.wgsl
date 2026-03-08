@@ -50,6 +50,7 @@ struct PerturbParams {
 @group(0) @binding(2) var<storage, read_write> final_z: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> ref_orbit: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> perturb: PerturbParams;
+@group(0) @binding(5) var<storage, read_write> orbit_traps: array<vec4<f32>>;
 
 // Complex multiply
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -108,6 +109,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         dn_m = vec2<f32>(0.0, 0.0);
         dn_e = 0;
     }
+    // Orbit trap points for Canopy palette
+    let trap0 = vec2<f32>(0.0, 0.0);
+    let trap1 = vec2<f32>(1.0, 0.0);
+    let trap2 = vec2<f32>(-0.5, 0.866);
+    let trap3 = vec2<f32>(-0.5, -0.866);
+    var trap_min = vec4<f32>(1e20, 1e20, 1e20, 1e20);
+
     var iter: u32 = max_i;
     var ref_i: u32 = 0u;
 
@@ -223,6 +231,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             z_full = vec2<f32>(Zn_re_hi, Zn_im_hi) + dn_real;
         }
 
+        // Orbit trap distances
+        trap_min.x = min(trap_min.x, length(z_full - trap0));
+        trap_min.y = min(trap_min.y, length(z_full - trap1));
+        trap_min.z = min(trap_min.z, length(z_full - trap2));
+        trap_min.w = min(trap_min.w, length(z_full - trap3));
+
         // Escape check
         let mag2 = dot(z_full, z_full);
         if mag2 > 256.0 {
@@ -269,4 +283,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         final_z[idx] = vec4<f32>(dn_out.x, dn_out.y, 0.0, 0.0);
     }
+    orbit_traps[idx] = trap_min;
 }

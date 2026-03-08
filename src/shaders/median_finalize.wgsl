@@ -29,6 +29,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;
 @group(0) @binding(3) var<storage, read> final_z: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> roots: array<vec2<f32>>;
+@group(0) @binding(5) var<storage, read> orbit_traps: array<vec4<f32>>;
 
 // -- Oklab to linear sRGB ---------------------------------------------------
 
@@ -188,6 +189,36 @@ fn palette_storm(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     return mix(with_glow, bolt, lightning);
 }
 
+// Palette 7: Primordial Canopy — orbit trap jewel accents over warm golden-green
+fn palette_canopy(smooth_iter: f32, idx: u32) -> vec3<f32> {
+    let traps = orbit_traps[idx];
+    let log_iter = log2(smooth_iter + 1.0);
+
+    let canopy_phase = log_iter * 0.15;
+    let canopy = vec3<f32>(
+        0.12 + 0.08 * cos(canopy_phase + 0.5),
+        0.15 + 0.10 * cos(canopy_phase),
+        0.04 + 0.03 * cos(canopy_phase + 1.0)
+    );
+
+    let ruby     = vec3<f32>(0.85, 0.12, 0.15);
+    let sapphire = vec3<f32>(0.15, 0.20, 0.90);
+    let amber    = vec3<f32>(0.90, 0.65, 0.10);
+    let emerald  = vec3<f32>(0.10, 0.80, 0.30);
+
+    let trap_scale = params.coloring_param;
+    let i0 = exp(-traps.x * trap_scale);
+    let i1 = exp(-traps.y * trap_scale);
+    let i2 = exp(-traps.z * trap_scale);
+    let i3 = exp(-traps.w * trap_scale);
+
+    let jewels = ruby * i0 + sapphire * i1 + amber * i2 + emerald * i3;
+
+    let canopy_brightness = 0.6 + 0.4 * cos(log_iter * 0.08);
+    let jewel_total = min(i0 + i1 + i2 + i3, 1.0);
+    return mix(canopy * canopy_brightness, jewels, jewel_total);
+}
+
 fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: u32, py: u32) -> vec3<f32> {
     switch params.palette {
         case 1u: { return palette_oklab(smooth_iter); }
@@ -196,6 +227,7 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: 
         case 4u: { return palette_thin_film(smooth_iter, z, dz_mag, dz_angle); }
         case 5u: { return palette_aurora(smooth_iter); }
         case 6u: { return palette_storm(smooth_iter, px, py); }
+        case 7u: { return palette_canopy(smooth_iter, py * params.stride + px); }
         default: { return palette_classic(smooth_iter); }
     }
 }

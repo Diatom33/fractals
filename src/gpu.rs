@@ -32,6 +32,7 @@ pub struct GpuState {
     params_buffer: wgpu::Buffer,
     iterations_buffer: wgpu::Buffer,
     final_z_buffer: wgpu::Buffer,
+    orbit_trap_buffer: wgpu::Buffer, // vec4<f32> per pixel — min distances to 4 trap points
     accum_buffer: wgpu::Buffer,     // vec4<f32> per pixel — accumulated color + weight
     output_buffer: wgpu::Buffer,
     roots_buffer: wgpu::Buffer,
@@ -134,6 +135,12 @@ impl GpuState {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let orbit_trap_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orbit_traps"),
+            size: out_pixels * 16, // vec4<f32> per pixel (min dist to 4 trap points)
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("accum"),
             size: out_pixels * 16, // vec4<f32> per pixel (rgb + weight)
@@ -180,6 +187,7 @@ impl GpuState {
                     bgl_entry(0, wgpu::BufferBindingType::Uniform),
                     bgl_entry_storage(1, false), // iterations (read_write)
                     bgl_entry_storage(2, false), // final_z (read_write)
+                    bgl_entry_storage(3, false), // orbit_traps (read_write)
                 ],
             });
 
@@ -191,6 +199,7 @@ impl GpuState {
                     bgl_entry_storage(1, false), // iterations
                     bgl_entry_storage(2, false), // final_z
                     bgl_entry_storage(3, true),  // roots (read_only)
+                    bgl_entry_storage(4, false), // orbit_traps (read_write)
                 ],
             });
 
@@ -203,6 +212,7 @@ impl GpuState {
                     bgl_entry_storage(2, true),  // final_z (read_only)
                     bgl_entry_storage(3, false), // accum (read_write)
                     bgl_entry_storage(4, true),  // roots (read_only)
+                    bgl_entry_storage(5, true),  // orbit_traps (read_only)
                 ],
             });
 
@@ -225,6 +235,7 @@ impl GpuState {
                     bgl_entry_storage(2, false), // output (read_write)
                     bgl_entry_storage(3, true),  // final_z (read_only)
                     bgl_entry_storage(4, true),  // roots (read_only)
+                    bgl_entry_storage(5, true),  // orbit_traps (read_only)
                 ],
             });
 
@@ -248,6 +259,7 @@ impl GpuState {
                     bgl_entry_storage(2, false),                       // final_z (rw)
                     bgl_entry_storage(3, true),                        // ref_orbit (read)
                     bgl_entry(4, wgpu::BufferBindingType::Uniform),   // perturb_params
+                    bgl_entry_storage(5, false),                       // orbit_traps (rw)
                 ],
             });
         let perturb_pipeline = create_pipeline(device, &perturb_shader, &perturb_bind_group_layout);
@@ -262,6 +274,7 @@ impl GpuState {
                 bg_entry(2, &final_z_buffer),
                 bg_entry(3, &ref_orbit_buffer),
                 bg_entry(4, &perturb_params_buffer),
+                bg_entry(5, &orbit_trap_buffer),
             ],
         });
 
@@ -272,6 +285,7 @@ impl GpuState {
                 bg_entry(0, &params_buffer),
                 bg_entry(1, &iterations_buffer),
                 bg_entry(2, &final_z_buffer),
+                bg_entry(3, &orbit_trap_buffer),
             ],
         });
 
@@ -283,6 +297,7 @@ impl GpuState {
                 bg_entry(1, &iterations_buffer),
                 bg_entry(2, &final_z_buffer),
                 bg_entry(3, &roots_buffer),
+                bg_entry(4, &orbit_trap_buffer),
             ],
         });
 
@@ -295,6 +310,7 @@ impl GpuState {
                 bg_entry(2, &final_z_buffer),
                 bg_entry(3, &accum_buffer),
                 bg_entry(4, &roots_buffer),
+                bg_entry(5, &orbit_trap_buffer),
             ],
         });
 
@@ -317,6 +333,7 @@ impl GpuState {
                 bg_entry(2, &output_buffer),
                 bg_entry(3, &final_z_buffer),
                 bg_entry(4, &roots_buffer),
+                bg_entry(5, &orbit_trap_buffer),
             ],
         });
 
@@ -346,6 +363,7 @@ impl GpuState {
             params_buffer,
             iterations_buffer,
             final_z_buffer,
+            orbit_trap_buffer,
             accum_buffer,
             output_buffer,
             roots_buffer,
@@ -404,6 +422,12 @@ impl GpuState {
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
+            self.orbit_trap_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("orbit_traps"),
+                size: out_pixels * 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
             self.accum_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("accum"),
                 size: out_pixels * 16,
@@ -431,6 +455,7 @@ impl GpuState {
                     bg_entry(0, &self.params_buffer),
                     bg_entry(1, &self.iterations_buffer),
                     bg_entry(2, &self.final_z_buffer),
+                    bg_entry(3, &self.orbit_trap_buffer),
                 ],
             });
             self.newton_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -441,6 +466,7 @@ impl GpuState {
                     bg_entry(1, &self.iterations_buffer),
                     bg_entry(2, &self.final_z_buffer),
                     bg_entry(3, &self.roots_buffer),
+                    bg_entry(4, &self.orbit_trap_buffer),
                 ],
             });
             self.colorize_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -452,6 +478,7 @@ impl GpuState {
                     bg_entry(2, &self.final_z_buffer),
                     bg_entry(3, &self.accum_buffer),
                     bg_entry(4, &self.roots_buffer),
+                    bg_entry(5, &self.orbit_trap_buffer),
                 ],
             });
             self.finalize_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -472,6 +499,7 @@ impl GpuState {
                     bg_entry(2, &self.output_buffer),
                     bg_entry(3, &self.final_z_buffer),
                     bg_entry(4, &self.roots_buffer),
+                    bg_entry(5, &self.orbit_trap_buffer),
                 ],
             });
             self.perturb_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -483,6 +511,7 @@ impl GpuState {
                     bg_entry(2, &self.final_z_buffer),
                     bg_entry(3, &self.ref_orbit_buffer),
                     bg_entry(4, &self.perturb_params_buffer),
+                    bg_entry(5, &self.orbit_trap_buffer),
                 ],
             });
         }
@@ -509,6 +538,7 @@ impl GpuState {
                     bg_entry(2, &self.final_z_buffer),
                     bg_entry(3, &self.ref_orbit_buffer),
                     bg_entry(4, &self.perturb_params_buffer),
+                    bg_entry(5, &self.orbit_trap_buffer),
                 ],
             });
         }

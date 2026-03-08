@@ -187,6 +187,7 @@ pub enum ColorPalette {
     ThinFilm,    // 4: Soap bubble / oil slick iridescence
     Aurora,      // 5: Midnight aurora green-violet bands
     Storm,       // 6: Oppressive brass murk with lightning
+    Canopy,      // 7: Primordial canopy — orbit trap jewels over golden-green
 }
 
 impl ColorPalette {
@@ -198,6 +199,7 @@ impl ColorPalette {
         ColorPalette::ThinFilm,
         ColorPalette::Aurora,
         ColorPalette::Storm,
+        ColorPalette::Canopy,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -209,6 +211,7 @@ impl ColorPalette {
             ColorPalette::ThinFilm => "Thin Film",
             ColorPalette::Aurora => "Midnight Aurora",
             ColorPalette::Storm => "Storm",
+            ColorPalette::Canopy => "Primordial Canopy",
         }
     }
 
@@ -221,6 +224,7 @@ impl ColorPalette {
             ColorPalette::ThinFilm => 4,
             ColorPalette::Aurora => 5,
             ColorPalette::Storm => 6,
+            ColorPalette::Canopy => 7,
         }
     }
 
@@ -230,13 +234,14 @@ impl ColorPalette {
             ColorPalette::ThinFilm => 2.0,   // angular lobe count
             ColorPalette::Aurora => 3.0,      // band frequency
             ColorPalette::Storm => 10.0,      // sigmoid steepness
+            ColorPalette::Canopy => 3.0,      // trap scale
             _ => 0.0,
         }
     }
 
     /// Whether this palette uses the coloring_param slider.
     pub fn has_param(&self) -> bool {
-        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm)
+        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy)
     }
 
     /// Label for the coloring_param slider.
@@ -245,6 +250,7 @@ impl ColorPalette {
             ColorPalette::ThinFilm => "Iridescence lobes",
             ColorPalette::Aurora => "Band frequency",
             ColorPalette::Storm => "Contrast",
+            ColorPalette::Canopy => "Trap scale",
             _ => "",
         }
     }
