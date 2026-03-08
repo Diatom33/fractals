@@ -27,6 +27,8 @@ struct Params {
     sample_index: u32,
     num_samples: u32,
     coloring_param: f32,
+    real_pixel_step: vec2<f32>,
+    _pad: vec2<u32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -231,30 +233,26 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(nx0, nx1, u.y);
 }
 
-// Ridged multifractal noise — sharp ridges and veins instead of smooth Perlin blobs.
-// Each octave takes abs(noise*2-1) and inverts it, creating sharp creases.
-// Previous octave's value weights the next, concentrating detail in the ridges.
-fn ridged_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
+// Fractal Brownian motion with dynamic octave count
+fn fbm_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
     var total: f32 = 0.0;
-    var amplitude: f32 = 1.0;
+    var amplitude: f32 = 0.5;
     var freq: f32 = 1.0;
-    var prev: f32 = 1.0;
+    var max_val: f32 = 0.0;
     for (var i: i32 = 0; i < num_octaves; i++) {
-        var n = value_noise(p * freq);
-        n = 1.0 - abs(n * 2.0 - 1.0);  // sharp ridges at n ≈ 0.5
-        n = n * n;                        // sharpen further
-        total += n * amplitude * prev;
-        prev = n;
+        total += amplitude * value_noise(p * freq);
+        max_val += amplitude;
         amplitude *= 0.5;
-        freq *= 2.2;  // slightly non-dyadic for less grid alignment
+        freq *= 2.0;
     }
-    return clamp(total * 0.5, 0.0, 1.0);
+    return total / max_val;
 }
 
-// Palette 6: Storm Threshold — dark atmosphere with bright lightning at steep iteration gradients
-// Noise uses orbit-space coordinates (log|z|, arg(z)) so it's zoom-independent and works in perturbation mode.
-fn palette_storm(smooth_iter: f32, z: vec2<f32>, dz_angle: f32, idx: u32) -> vec3<f32> {
-    let steepness = params.coloring_param; // sigmoid steepness
+// Palette 6: Storm Threshold — dark atmosphere with bright lightning at steep iteration gradients.
+// fBm noise in complex-plane coordinates masks lightning into sparse patches.
+// Uses real_pixel_step (not pixel_step which is mantissa in perturbation mode).
+fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
+    let steepness = params.coloring_param;
     let stride_val = params.stride;
     let h = params.resolution.y;
     let px = idx % stride_val;
@@ -274,19 +272,21 @@ fn palette_storm(smooth_iter: f32, z: vec2<f32>, dz_angle: f32, idx: u32) -> vec
     }
     let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
 
-    // Orbit-space noise coordinates — zoom-independent, works in perturbation mode.
-    // log|z| gives radial distance in orbit space, arg(z) gives angular position.
-    // These are intrinsic to the fractal geometry and don't depend on pixel_step.
-    let z_len = max(length(z), 1e-10);
-    let log_r = log2(z_len);
-    let angle = atan2(z.y, z.x);
-    let noise_pos = vec2<f32>(log_r * 0.8, angle * 1.5);
+    // Complex-plane coordinates using real_pixel_step (correct even in perturbation mode)
+    let cx = params.center_hi.x + params.center_lo.x
+           + (f32(px) - f32(params.resolution.x) * 0.5) * params.real_pixel_step.x;
+    let cy = params.center_hi.y + params.center_lo.y
+           + (f32(py) - f32(params.resolution.y) * 0.5) * params.real_pixel_step.y;
+    let complex_pos = vec2<f32>(cx, cy);
 
-    // Octaves scale with iteration count — deeper zoom = higher iters = more detail
-    let octaves = clamp(i32(log2(smooth_iter + 1.0)) + 1, 3, 10);
+    // Dynamic octaves: more detail as zoom increases
+    let octaves = clamp(i32(floor(-log2(params.real_pixel_step.x)) - 5.0), 3, 12);
 
-    let noise_val = ridged_noise(noise_pos, octaves);
-    let mask = smoothstep(0.3, 0.7, noise_val);
+    // fBm at ~1.5 base freq: produces broad patches with fractal detail inside
+    let noise_val = fbm_noise(complex_pos * 1.5, octaves);
+
+    // Soft threshold: bright spots where noise > 0.5, dark voids where < 0.5
+    let mask = smoothstep(0.35, 0.65, noise_val);
 
     // Sigmoid contrast on base value
     let log_iter = log2(smooth_iter + 1.0);
@@ -299,14 +299,14 @@ fn palette_storm(smooth_iter: f32, z: vec2<f32>, dz_angle: f32, idx: u32) -> vec
     let val = 0.12 + 0.22 * v;
     let base = hsv_to_rgb(hue, sat, val);
 
-    // Edge glow: dim purple at steep gradients, partially masked (always some glow)
+    // Edge glow: dim purple at steep gradients, partially masked
     let edge_glow = smoothstep(0.5, 2.0, grad_mag);
     let glow_mask = mix(0.3, 1.0, mask);
     let glow_color = vec3<f32>(0.25, 0.12, 0.40);
 
-    // Lightning: bright blue-white only at very steep gradients, fully masked by ridged noise
+    // Lightning: bright blue-violet at very steep gradients, masked by fBm
     let lightning = smoothstep(1.5, 4.0, grad_mag) * mask;
-    let bolt = vec3<f32>(0.90, 0.90, 1.0);
+    let bolt = vec3<f32>(0.82, 0.78, 1.0);
 
     let with_glow = mix(base, glow_color, edge_glow * glow_mask);
     return mix(with_glow, bolt, lightning);
@@ -458,7 +458,7 @@ fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, dz_mag: f32, dz_a
         case 3u: { return palette_mono(smooth_iter); }
         case 4u: { return palette_thin_film(smooth_iter, z, dz_mag, dz_angle); }
         case 5u: { return palette_aurora(smooth_iter); }
-        case 6u: { return palette_storm(smooth_iter, z, dz_angle, idx); }
+        case 6u: { return palette_storm(smooth_iter, idx); }
         case 7u: { return palette_canopy(smooth_iter, idx); }
         case 8u: { return palette_biolum(smooth_iter, idx); }
         default: { return palette_classic(smooth_iter); }

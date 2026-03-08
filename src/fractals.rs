@@ -406,6 +406,8 @@ impl FractalParams {
             sample_index: 0,
             num_samples: 1,
             coloring_param: self.coloring_param,
+            real_pixel_step: [step_x as f32, step_y as f32],
+            _pad: [0; 2],
         }
     }
 }
@@ -652,14 +654,14 @@ pub fn compute_variant_reference_orbit(
 }
 
 /// GPU-side uniform struct. Must match WGSL layout exactly.
-/// Total 80 bytes. Uses center + pixel_step instead of raw bounds
+/// Uses center + pixel_step instead of raw bounds
 /// to enable double-single (emulated f64) precision in shaders.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuParams {
     pub center_hi: [f32; 2],       // 8 bytes  (offset 0)  — view center (high part)
     pub center_lo: [f32; 2],       // 8 bytes  (offset 8)  — view center (low part, sub-ULP)
-    pub pixel_step: [f32; 2],      // 8 bytes  (offset 16) — complex units per pixel
+    pub pixel_step: [f32; 2],      // 8 bytes  (offset 16) — complex units per pixel (mantissa in perturbation)
     pub resolution: [u32; 2],      // 8 bytes  (offset 24) — OUTPUT resolution
     pub max_iter: u32,             // 4 bytes  (offset 32)
     pub fractal_type: u32,         // 4 bytes  (offset 36)
@@ -675,5 +677,7 @@ pub struct GpuParams {
     pub sample_index: u32,         // 4 bytes  (offset 84) — which sub-pixel sample (0..N-1)
     pub num_samples: u32,          // 4 bytes  (offset 88) — total number of samples
     pub coloring_param: f32,       // 4 bytes  (offset 92) — palette-specific parameter
+    pub real_pixel_step: [f32; 2], // 8 bytes  (offset 96) — always true pixel step (even in perturbation)
+    pub _pad: [u32; 2],           // 8 bytes  (offset 104) — pad to 112 (multiple of 16)
 }
-// Total: 96 bytes
+// Total: 112 bytes

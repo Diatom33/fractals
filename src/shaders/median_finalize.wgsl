@@ -22,6 +22,8 @@ struct Params {
     sample_index: u32,
     num_samples: u32,
     coloring_param: f32,
+    real_pixel_step: vec2<f32>,
+    _pad: vec2<u32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -174,26 +176,24 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(nx0, nx1, u.y);
 }
 
-// Ridged multifractal noise — sharp ridges and veins instead of smooth Perlin blobs.
-fn ridged_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
+
+// Ridged noise is no longer used; keeping fbm_noise for storm masking
+fn fbm_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
     var total: f32 = 0.0;
-    var amplitude: f32 = 1.0;
+    var amplitude: f32 = 0.5;
     var freq: f32 = 1.0;
-    var prev: f32 = 1.0;
+    var max_val: f32 = 0.0;
     for (var i: i32 = 0; i < num_octaves; i++) {
-        var n = value_noise(p * freq);
-        n = 1.0 - abs(n * 2.0 - 1.0);
-        n = n * n;
-        total += n * amplitude * prev;
-        prev = n;
+        total += amplitude * value_noise(p * freq);
+        max_val += amplitude;
         amplitude *= 0.5;
-        freq *= 2.2;
+        freq *= 2.0;
     }
-    return clamp(total * 0.5, 0.0, 1.0);
+    return total / max_val;
 }
 
-// Palette 6: Storm Threshold — orbit-space ridged noise for zoom-independent lightning masking
-fn palette_storm(smooth_iter: f32, z: vec2<f32>, dz_angle: f32, px: u32, py: u32) -> vec3<f32> {
+// Palette 6: Storm Threshold — fBm-masked lightning using real_pixel_step for correct coords
+fn palette_storm(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     let steepness = params.coloring_param;
     let stride_val = params.stride;
     let h = params.resolution.y;
@@ -210,14 +210,15 @@ fn palette_storm(smooth_iter: f32, z: vec2<f32>, dz_angle: f32, px: u32, py: u32
     }
     let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
 
-    let z_len = max(length(z), 1e-10);
-    let log_r = log2(z_len);
-    let angle = atan2(z.y, z.x);
-    let noise_pos = vec2<f32>(log_r * 0.8, angle * 1.5);
-    let octaves = clamp(i32(log2(smooth_iter + 1.0)) + 1, 3, 10);
+    let cx = params.center_hi.x + params.center_lo.x
+           + (f32(px) - f32(params.resolution.x) * 0.5) * params.real_pixel_step.x;
+    let cy = params.center_hi.y + params.center_lo.y
+           + (f32(py) - f32(params.resolution.y) * 0.5) * params.real_pixel_step.y;
+    let complex_pos = vec2<f32>(cx, cy);
 
-    let noise_val = ridged_noise(noise_pos, octaves);
-    let mask = smoothstep(0.3, 0.7, noise_val);
+    let octaves = clamp(i32(floor(-log2(params.real_pixel_step.x)) - 5.0), 3, 12);
+    let noise_val = fbm_noise(complex_pos * 1.5, octaves);
+    let mask = smoothstep(0.35, 0.65, noise_val);
 
     let log_iter = log2(smooth_iter + 1.0);
     let x_val = fract(log_iter * 0.06);
@@ -233,7 +234,7 @@ fn palette_storm(smooth_iter: f32, z: vec2<f32>, dz_angle: f32, px: u32, py: u32
     let glow_color = vec3<f32>(0.25, 0.12, 0.40);
 
     let lightning = smoothstep(1.5, 4.0, grad_mag) * mask;
-    let bolt = vec3<f32>(0.90, 0.90, 1.0);
+    let bolt = vec3<f32>(0.82, 0.78, 1.0);
 
     let with_glow = mix(base, glow_color, edge_glow * glow_mask);
     return mix(with_glow, bolt, lightning);
@@ -368,7 +369,7 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: 
         case 3u: { return palette_mono(smooth_iter); }
         case 4u: { return palette_thin_film(smooth_iter, z, dz_mag, dz_angle); }
         case 5u: { return palette_aurora(smooth_iter); }
-        case 6u: { return palette_storm(smooth_iter, z, dz_angle, px, py); }
+        case 6u: { return palette_storm(smooth_iter, px, py); }
         case 7u: { return palette_canopy(smooth_iter, py * params.stride + px); }
         case 8u: { return palette_biolum(smooth_iter, px, py); }
         default: { return palette_classic(smooth_iter); }
