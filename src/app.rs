@@ -3,6 +3,8 @@
 use crate::fractals::{FractalParams, FractalType};
 use crate::gpu::GpuState;
 use rug::Float;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Saved view state for undo history and drag operations.
 #[derive(Clone)]
@@ -59,6 +61,14 @@ pub struct FractalApp {
     export_msg: String,
     export_msg_is_error: bool,
 
+    // High-res export
+    hires_width: u32,
+    hires_height: u32,
+    hires_ss: u32,
+    hires_path: String,
+    hires_status: Arc<Mutex<Option<String>>>,
+    hires_in_progress: Arc<AtomicBool>,
+
     // Coordinate display
     cursor_complex: Option<(f64, f64)>,
 
@@ -101,6 +111,12 @@ impl FractalApp {
             export_path: String::from("fractal.png"),
             export_msg: String::new(),
             export_msg_is_error: false,
+            hires_width: 3840,
+            hires_height: 2160,
+            hires_ss: 2,
+            hires_path: String::from("~/fractal_export.png"),
+            hires_status: Arc::new(Mutex::new(None)),
+            hires_in_progress: Arc::new(AtomicBool::new(false)),
             cursor_complex: None,
             last_display_w: 0,
             last_display_h: 0,
@@ -481,6 +497,94 @@ impl eframe::App for FractalApp {
                             ui.label(
                                 egui::RichText::new(&self.export_msg).small().color(color),
                             );
+                        }
+
+                        // ── High-Res Export ────────────────────────────
+                        section_header(ui, "High-Res Export");
+
+                        ui.horizontal(|ui| {
+                            ui.label("Width:");
+                            ui.add(egui::DragValue::new(&mut self.hires_width).range(64..=15360).speed(16));
+                            ui.label("Height:");
+                            ui.add(egui::DragValue::new(&mut self.hires_height).range(64..=8640).speed(16));
+                        });
+
+                        ui.add_space(2.0);
+                        let hires_ss_label = match self.hires_ss {
+                            2 => "4x4 (16 samples)",
+                            3 => "8x8 (64 samples)",
+                            _ => "Off",
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label("SS:");
+                            egui::ComboBox::from_id_salt("hires_ss")
+                                .width(ui.available_width() - 8.0)
+                                .selected_text(hires_ss_label)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.hires_ss, 1, "Off");
+                                    ui.selectable_value(&mut self.hires_ss, 2, "4x4 (16 samples)");
+                                    ui.selectable_value(&mut self.hires_ss, 3, "8x8 (64 samples)");
+                                });
+                        });
+
+                        ui.add_space(2.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.hires_path)
+                                .desired_width(ui.available_width() - 8.0),
+                        );
+
+                        ui.add_space(4.0);
+                        let in_progress = self.hires_in_progress.load(Ordering::Relaxed);
+                        let export_btn = ui.add_enabled(
+                            !in_progress,
+                            egui::Button::new(if in_progress { "Exporting..." } else { "Export Hi-Res" })
+                                .min_size(egui::vec2(ui.available_width() - 8.0, 24.0)),
+                        );
+                        if export_btn.clicked() {
+                            let params = self.params.clone();
+                            let config = crate::export::ExportConfig {
+                                width: self.hires_width,
+                                height: self.hires_height,
+                                ss: self.hires_ss,
+                                max_iter: None,
+                                path: self.hires_path.clone(),
+                            };
+                            let status = self.hires_status.clone();
+                            let in_prog = self.hires_in_progress.clone();
+                            let ctx_clone = ctx.clone();
+                            in_prog.store(true, Ordering::Relaxed);
+                            *status.lock().unwrap() = Some("Starting export...".to_string());
+                            std::thread::spawn(move || {
+                                let status_cb = {
+                                    let status = status.clone();
+                                    let ctx = ctx_clone.clone();
+                                    move |msg: String| {
+                                        *status.lock().unwrap() = Some(msg);
+                                        ctx.request_repaint();
+                                    }
+                                };
+                                match crate::export::export_headless(&params, &config, status_cb) {
+                                    Ok(msg) => *status.lock().unwrap() = Some(format!("Done: {msg}")),
+                                    Err(e) => *status.lock().unwrap() = Some(format!("ERROR: {e}")),
+                                }
+                                in_prog.store(false, Ordering::Relaxed);
+                                ctx_clone.request_repaint();
+                            });
+                        }
+
+                        if in_progress {
+                            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                        }
+
+                        if let Some(status_msg) = self.hires_status.lock().unwrap().as_ref() {
+                            let color = if status_msg.starts_with("ERROR") {
+                                egui::Color32::from_rgb(255, 120, 120)
+                            } else if status_msg.starts_with("Done") {
+                                egui::Color32::from_rgb(120, 255, 120)
+                            } else {
+                                egui::Color32::from_rgb(180, 180, 220)
+                            };
+                            ui.label(egui::RichText::new(status_msg).small().color(color));
                         }
                     });
             });
