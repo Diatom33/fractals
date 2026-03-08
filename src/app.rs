@@ -201,6 +201,12 @@ impl FractalApp {
         }
         hash ^= self.params.use_median as u64;
         hash ^= (self.params.coloring_param.to_bits() as u64) << 32;
+        if self.params.fractal_type.is_nebulabrot() {
+            hash ^= self.params.nebula_iter_r as u64;
+            hash ^= (self.params.nebula_iter_g as u64) << 16;
+            hash ^= (self.params.nebula_iter_b as u64) << 32;
+            hash ^= self.params.nebula_samples_m.to_bits();
+        }
         hash
     }
 }
@@ -427,6 +433,35 @@ impl eframe::App for FractalApp {
                             {
                                 self.needs_render = true;
                             }
+                        }
+
+                        if self.params.fractal_type.is_nebulabrot() {
+                            ui.add_space(4.0);
+                            section_header(ui, "Nebulabrot");
+                            ui.horizontal(|ui| {
+                                ui.label("R iters:");
+                                if ui.add(egui::DragValue::new(&mut self.params.nebula_iter_r).range(10..=50000).speed(10)).changed() {
+                                    self.needs_render = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("G iters:");
+                                if ui.add(egui::DragValue::new(&mut self.params.nebula_iter_g).range(10..=50000).speed(10)).changed() {
+                                    self.needs_render = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("B iters:");
+                                if ui.add(egui::DragValue::new(&mut self.params.nebula_iter_b).range(10..=50000).speed(10)).changed() {
+                                    self.needs_render = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Samples (M):");
+                                if ui.add(egui::DragValue::new(&mut self.params.nebula_samples_m).range(1.0..=1000.0).speed(1.0).max_decimals(0)).changed() {
+                                    self.needs_render = true;
+                                }
+                            });
                         }
 
                         // ── Navigation ────────────────────────────────
@@ -827,13 +862,33 @@ impl eframe::App for FractalApp {
                 let did_render = self.needs_render || hash != self.prev_params_hash;
                 if did_render {
                     if let Some(gpu) = &mut self.gpu {
-                        // Use SS=1 during interactive operations for responsiveness
-                        let render_ss = if self.pending_quality_render {
-                            1
+                        if self.params.fractal_type.is_nebulabrot() {
+                            let cx = self.params.center_re.to_f64();
+                            let cy = self.params.center_im.to_f64();
+                            let aspect = gpu.display_width as f64 / gpu.height as f64;
+                            let half_y = self.params.half_range_y;
+                            let half_x = half_y * aspect;
+                            let view_min = [(cx - half_x) as f32, (cy - half_y) as f32];
+                            let view_max = [(cx + half_x) as f32, (cy + half_y) as f32];
+                            let dispatches = if self.pending_quality_render {
+                                ((self.params.nebula_samples_m * 1_000_000.0 / (65536.0 * 64.0)) as u32).max(1) / 4
+                            } else {
+                                ((self.params.nebula_samples_m * 1_000_000.0 / (65536.0 * 64.0)) as u32).max(1)
+                            }.max(1);
+                            gpu.render_nebulabrot(
+                                view_min, view_max,
+                                self.params.nebula_iter_r, self.params.nebula_iter_g, self.params.nebula_iter_b,
+                                dispatches,
+                            );
                         } else {
-                            self.params.supersampling
-                        };
-                        gpu.render(&self.params, render_ss, self.params.use_median);
+                            // Use SS=1 during interactive operations for responsiveness
+                            let render_ss = if self.pending_quality_render {
+                                1
+                            } else {
+                                self.params.supersampling
+                            };
+                            gpu.render(&self.params, render_ss, self.params.use_median);
+                        }
                     }
                     self.prev_params_hash = self.params_hash();
                     self.needs_render = false;

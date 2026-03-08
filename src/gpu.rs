@@ -3,7 +3,7 @@
 /// at the output resolution with a coordinate offset, colorized, and
 /// accumulated into a float buffer. A final pass normalizes and packs to RGBA.
 
-use crate::fractals::{FractalParams, GpuParams, PerturbGpuParams};
+use crate::fractals::{FractalParams, GpuParams, NebulaGpuParams, NebulaFinParams, PerturbGpuParams};
 use rug::Float;
 
 /// Max sub-pixel samples for median mode. 9 (3×3) keeps the iterations buffer
@@ -74,6 +74,20 @@ pub struct GpuState {
 
     // Staging buffer for batched sample params (avoids per-sample GPU sync)
     params_staging_buffer: wgpu::Buffer,
+
+    // Nebulabrot interactive pipeline
+    nebula_sample_pipeline: wgpu::ComputePipeline,
+    nebula_finalize_pipeline: wgpu::ComputePipeline,
+    nebula_sample_bind_group_layout: wgpu::BindGroupLayout,
+    nebula_finalize_bind_group_layout: wgpu::BindGroupLayout,
+    nebula_sample_bind_group: wgpu::BindGroup,
+    nebula_finalize_bind_group: wgpu::BindGroup,
+    nebula_params_buffer: wgpu::Buffer,
+    nebula_fin_params_buffer: wgpu::Buffer,
+    nebula_hist_r: wgpu::Buffer,
+    nebula_hist_g: wgpu::Buffer,
+    nebula_hist_b: wgpu::Buffer,
+    nebula_hist_readback: wgpu::Buffer,
 
     // Timing
     pub last_render_ms: f64,
@@ -353,6 +367,92 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        // Nebulabrot interactive pipeline
+        let nebula_sample_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nebula_sample"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/nebula_sample.wgsl").into()),
+        });
+        let nebula_finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nebula_finalize"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/nebula_finalize.wgsl").into()),
+        });
+
+        let nebula_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nebula_params"),
+            size: std::mem::size_of::<NebulaGpuParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let nebula_fin_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nebula_fin_params"),
+            size: std::mem::size_of::<NebulaFinParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let hist_size = out_pixels * 4;
+        let hist_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let nebula_hist_r = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nebula_hist_r"), size: hist_size, usage: hist_usage, mapped_at_creation: false,
+        });
+        let nebula_hist_g = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nebula_hist_g"), size: hist_size, usage: hist_usage, mapped_at_creation: false,
+        });
+        let nebula_hist_b = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nebula_hist_b"), size: hist_size, usage: hist_usage, mapped_at_creation: false,
+        });
+        let nebula_hist_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nebula_hist_readback"),
+            size: hist_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let nebula_sample_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nebula_sample layout"),
+            entries: &[
+                bgl_entry(0, wgpu::BufferBindingType::Uniform),
+                bgl_entry_storage(1, false),
+                bgl_entry_storage(2, false),
+                bgl_entry_storage(3, false),
+            ],
+        });
+        let nebula_finalize_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nebula_finalize layout"),
+            entries: &[
+                bgl_entry(0, wgpu::BufferBindingType::Uniform),
+                bgl_entry_storage(1, true),
+                bgl_entry_storage(2, true),
+                bgl_entry_storage(3, true),
+                bgl_entry_storage(4, false),
+            ],
+        });
+
+        let nebula_sample_pipeline = create_pipeline(device, &nebula_sample_shader, &nebula_sample_bind_group_layout);
+        let nebula_finalize_pipeline = create_pipeline(device, &nebula_finalize_shader, &nebula_finalize_bind_group_layout);
+
+        let nebula_sample_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nebula_sample bg"),
+            layout: &nebula_sample_bind_group_layout,
+            entries: &[
+                bg_entry(0, &nebula_params_buffer),
+                bg_entry(1, &nebula_hist_r),
+                bg_entry(2, &nebula_hist_g),
+                bg_entry(3, &nebula_hist_b),
+            ],
+        });
+        let nebula_finalize_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nebula_finalize bg"),
+            layout: &nebula_finalize_bind_group_layout,
+            entries: &[
+                bg_entry(0, &nebula_fin_params_buffer),
+                bg_entry(1, &nebula_hist_r),
+                bg_entry(2, &nebula_hist_g),
+                bg_entry(3, &nebula_hist_b),
+                bg_entry(4, &output_buffer),
+            ],
+        });
+
         GpuState {
             device: device.clone(),
             queue: queue.clone(),
@@ -391,6 +491,18 @@ impl GpuState {
             ref_orbit_max_entries,
             cached_ref_orbit: None,
             params_staging_buffer,
+            nebula_sample_pipeline,
+            nebula_finalize_pipeline,
+            nebula_sample_bind_group_layout,
+            nebula_finalize_bind_group_layout,
+            nebula_sample_bind_group,
+            nebula_finalize_bind_group,
+            nebula_params_buffer,
+            nebula_fin_params_buffer,
+            nebula_hist_r,
+            nebula_hist_g,
+            nebula_hist_b,
+            nebula_hist_readback,
             last_render_ms: 0.0,
             gpu_name,
         }
@@ -512,6 +624,45 @@ impl GpuState {
                     bg_entry(3, &self.ref_orbit_buffer),
                     bg_entry(4, &self.perturb_params_buffer),
                     bg_entry(5, &self.orbit_trap_buffer),
+                ],
+            });
+
+            // Nebula histogram buffers
+            let hist_size = out_pixels * 4;
+            let hist_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+            self.nebula_hist_r = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nebula_hist_r"), size: hist_size, usage: hist_usage, mapped_at_creation: false,
+            });
+            self.nebula_hist_g = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nebula_hist_g"), size: hist_size, usage: hist_usage, mapped_at_creation: false,
+            });
+            self.nebula_hist_b = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nebula_hist_b"), size: hist_size, usage: hist_usage, mapped_at_creation: false,
+            });
+            self.nebula_hist_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nebula_hist_readback"), size: hist_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            self.nebula_sample_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("nebula_sample bg"),
+                layout: &self.nebula_sample_bind_group_layout,
+                entries: &[
+                    bg_entry(0, &self.nebula_params_buffer),
+                    bg_entry(1, &self.nebula_hist_r),
+                    bg_entry(2, &self.nebula_hist_g),
+                    bg_entry(3, &self.nebula_hist_b),
+                ],
+            });
+            self.nebula_finalize_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("nebula_finalize bg"),
+                layout: &self.nebula_finalize_bind_group_layout,
+                entries: &[
+                    bg_entry(0, &self.nebula_fin_params_buffer),
+                    bg_entry(1, &self.nebula_hist_r),
+                    bg_entry(2, &self.nebula_hist_g),
+                    bg_entry(3, &self.nebula_hist_b),
+                    bg_entry(4, &self.output_buffer),
                 ],
             });
         }
@@ -758,6 +909,136 @@ impl GpuState {
         self.queue.submit(std::iter::once(encoder.finish()));
         self.device.poll(wgpu::Maintain::Wait);
         self.last_render_ms = start.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    /// Run the Nebulabrot histogram sampling pipeline inline on the app's device.
+    /// Clears histograms, runs sampling dispatches, reads back for exposure,
+    /// then runs finalize → output_buffer → readback.
+    pub fn render_nebulabrot(
+        &mut self,
+        view_min: [f32; 2],
+        view_max: [f32; 2],
+        max_iter_r: u32,
+        max_iter_g: u32,
+        max_iter_b: u32,
+        num_dispatches: u32,
+    ) {
+        let start = std::time::Instant::now();
+        let sample_min = [-2.5_f32, -1.5];
+        let sample_max = [1.0_f32, 1.5];
+        let threads_per_dispatch = 65536u32;
+        let samples_per_thread = 64u32;
+        let workgroups = (threads_per_dispatch + 255) / 256;
+
+        // Clear histograms
+        {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.clear_buffer(&self.nebula_hist_r, 0, None);
+            encoder.clear_buffer(&self.nebula_hist_g, 0, None);
+            encoder.clear_buffer(&self.nebula_hist_b, 0, None);
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.device.poll(wgpu::Maintain::Wait);
+        }
+
+        // Sampling dispatches
+        for dispatch_idx in 0..num_dispatches {
+            let gpu_params = NebulaGpuParams {
+                resolution: [self.display_width, self.height],
+                stride: self.width,
+                max_iter_r,
+                max_iter_g,
+                max_iter_b,
+                samples_per_thread,
+                dispatch_index: dispatch_idx,
+                sample_min,
+                sample_max,
+                view_min,
+                view_max,
+            };
+            self.queue.write_buffer(&self.nebula_params_buffer, 0, bytemuck::bytes_of(&gpu_params));
+
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.nebula_sample_pipeline);
+                pass.set_bind_group(0, &self.nebula_sample_bind_group, &[]);
+                pass.dispatch_workgroups(workgroups, 1, 1);
+            }
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.device.poll(wgpu::Maintain::Wait);
+        }
+
+        // Read back histograms for percentile-based exposure
+        let hist_size = (self.width as u64) * (self.height as u64) * 4;
+        let max_r = self.read_histogram_percentile(&self.nebula_hist_r, hist_size);
+        let max_g = self.read_histogram_percentile(&self.nebula_hist_g, hist_size);
+        let max_b = self.read_histogram_percentile(&self.nebula_hist_b, hist_size);
+
+        // Finalize
+        let fin_params = NebulaFinParams {
+            resolution: [self.display_width, self.height],
+            stride: self.width,
+            max_r,
+            max_g,
+            max_b,
+            _pad: [0; 2],
+        };
+        self.queue.write_buffer(&self.nebula_fin_params_buffer, 0, bytemuck::bytes_of(&fin_params));
+
+        let wg_x = (self.display_width + 15) / 16;
+        let wg_y = (self.height + 15) / 16;
+        let buf_size = (self.width as u64) * (self.height as u64) * 4;
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.nebula_finalize_pipeline);
+            pass.set_bind_group(0, &self.nebula_finalize_bind_group, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+        }
+        encoder.copy_buffer_to_buffer(&self.output_buffer, 0, &self.readback_buffer, 0, buf_size);
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.device.poll(wgpu::Maintain::Wait);
+
+        self.last_render_ms = start.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    /// Read a histogram buffer back and compute 99.9th percentile for exposure normalization.
+    fn read_histogram_percentile(&self, hist_buf: &wgpu::Buffer, hist_size: u64) -> u32 {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(hist_buf, 0, &self.nebula_hist_readback, 0, hist_size);
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.device.poll(wgpu::Maintain::Wait);
+
+        let slice = self.nebula_hist_readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+
+        let data = slice.get_mapped_range();
+        let values: &[u32] = bytemuck::cast_slice(&data);
+
+        // Collect non-zero visible pixels (skip stride padding)
+        let mut nonzero: Vec<u32> = Vec::new();
+        for row in 0..self.height {
+            let start = (row * self.width) as usize;
+            let end = start + self.display_width as usize;
+            for &v in &values[start..end] {
+                if v > 0 {
+                    nonzero.push(v);
+                }
+            }
+        }
+        drop(data);
+        self.nebula_hist_readback.unmap();
+
+        if nonzero.is_empty() {
+            return 1;
+        }
+        nonzero.sort_unstable();
+        let idx = ((nonzero.len() as f64) * 0.999) as usize;
+        nonzero[idx.min(nonzero.len() - 1)].max(1)
     }
 
     /// Read pixels back from the GPU readback buffer.

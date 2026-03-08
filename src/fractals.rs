@@ -16,6 +16,7 @@ pub enum FractalType {
     Celtic,
     Perpendicular,
     Buffalo,
+    Nebulabrot,
 }
 
 impl FractalType {
@@ -31,6 +32,7 @@ impl FractalType {
         FractalType::Celtic,
         FractalType::Perpendicular,
         FractalType::Buffalo,
+        FractalType::Nebulabrot,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -46,6 +48,7 @@ impl FractalType {
             FractalType::Celtic => "Celtic",
             FractalType::Perpendicular => "Perpendicular",
             FractalType::Buffalo => "Buffalo",
+            FractalType::Nebulabrot => "Nebulabrot",
         }
     }
 
@@ -63,6 +66,7 @@ impl FractalType {
             FractalType::Celtic => 8,
             FractalType::Perpendicular => 9,
             FractalType::Buffalo => 10,
+            FractalType::Nebulabrot => 11,
         }
     }
 
@@ -102,13 +106,19 @@ impl FractalType {
             FractalType::Celtic => [-2.5, 1.5, -2.0, 2.0],
             FractalType::Perpendicular => [-2.5, 1.5, -2.0, 2.0],
             FractalType::Buffalo => [-2.5, 1.5, -2.0, 2.0],
+            FractalType::Nebulabrot => [-2.5, 1.0, -1.25, 1.25],
         }
+    }
+
+    /// Whether this type uses its own rendering pipeline (not escape/newton).
+    pub fn is_nebulabrot(&self) -> bool {
+        matches!(self, FractalType::Nebulabrot)
     }
 
     /// Which controls should be visible for this fractal type.
     pub fn visible_controls(&self) -> Controls {
         match self {
-            FractalType::Mandelbrot | FractalType::BurningShip | FractalType::Tricorn | FractalType::Celtic | FractalType::Perpendicular | FractalType::Buffalo => Controls {
+            FractalType::Mandelbrot | FractalType::BurningShip | FractalType::Tricorn | FractalType::Celtic | FractalType::Perpendicular | FractalType::Buffalo | FractalType::Nebulabrot => Controls {
                 power: false,
                 julia_c: false,
                 relaxation: false,
@@ -176,6 +186,11 @@ pub struct FractalParams {
     pub palette: ColorPalette,
     pub coloring_param: f32,  // palette-specific parameter (thin-film k, aurora freq, storm steepness)
     pub use_median: bool,     // true = median iteration SS, false = Oklab accumulation SS
+    // Nebulabrot-specific params
+    pub nebula_iter_r: u32,
+    pub nebula_iter_g: u32,
+    pub nebula_iter_b: u32,
+    pub nebula_samples_m: f64,  // millions of samples
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,8 +202,7 @@ pub enum ColorPalette {
     ThinFilm,    // 4: Soap bubble / oil slick iridescence
     Aurora,      // 5: Midnight aurora green-violet bands
     Storm,       // 6: Oppressive brass murk with lightning
-    Canopy,      // 7: Primordial canopy — orbit trap jewels over golden-green
-    CanopyBokeh, // 8: Canopy with bright bokeh highlights (tone-mapped)
+    Canopy,      // 7: Canopy with bright bokeh highlights (tone-mapped)
 }
 
 impl ColorPalette {
@@ -201,7 +215,6 @@ impl ColorPalette {
         ColorPalette::Aurora,
         ColorPalette::Storm,
         ColorPalette::Canopy,
-        ColorPalette::CanopyBokeh,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -213,8 +226,7 @@ impl ColorPalette {
             ColorPalette::ThinFilm => "Thin Film",
             ColorPalette::Aurora => "Midnight Aurora",
             ColorPalette::Storm => "Storm",
-            ColorPalette::Canopy => "Primordial Canopy",
-            ColorPalette::CanopyBokeh => "Canopy Bokeh",
+            ColorPalette::Canopy => "Canopy",
         }
     }
 
@@ -228,7 +240,6 @@ impl ColorPalette {
             ColorPalette::Aurora => 5,
             ColorPalette::Storm => 6,
             ColorPalette::Canopy => 7,
-            ColorPalette::CanopyBokeh => 8,
         }
     }
 
@@ -239,14 +250,13 @@ impl ColorPalette {
             ColorPalette::Aurora => 3.0,      // band frequency
             ColorPalette::Storm => 10.0,      // sigmoid steepness
             ColorPalette::Canopy => 3.0,      // trap scale
-            ColorPalette::CanopyBokeh => 3.0,  // trap scale
             _ => 0.0,
         }
     }
 
     /// Whether this palette uses the coloring_param slider.
     pub fn has_param(&self) -> bool {
-        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::CanopyBokeh)
+        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy)
     }
 
     /// Label for the coloring_param slider.
@@ -256,7 +266,6 @@ impl ColorPalette {
             ColorPalette::Aurora => "Band frequency",
             ColorPalette::Storm => "Contrast",
             ColorPalette::Canopy => "Trap scale",
-            ColorPalette::CanopyBokeh => "Trap scale",
             _ => "",
         }
     }
@@ -280,6 +289,10 @@ impl Default for FractalParams {
             palette: ColorPalette::Oklab,
             coloring_param: ColorPalette::Oklab.default_param(),
             use_median: true,
+            nebula_iter_r: 5000,
+            nebula_iter_g: 500,
+            nebula_iter_b: 50,
+            nebula_samples_m: 10.0,
         }
     }
 }
