@@ -202,7 +202,8 @@ pub enum ColorPalette {
     ThinFilm,    // 4: Soap bubble / oil slick iridescence
     Aurora,      // 5: Midnight aurora green-violet bands
     Storm,       // 6: Oppressive brass murk with lightning
-    Canopy,      // 7: Canopy with bright bokeh highlights (tone-mapped)
+    Canopy,           // 7: Canopy with bright bokeh highlights (tone-mapped)
+    Bioluminescence,  // 8: Deep-sea abyssal bioluminescence with depth-aware glow
 }
 
 impl ColorPalette {
@@ -215,6 +216,7 @@ impl ColorPalette {
         ColorPalette::Aurora,
         ColorPalette::Storm,
         ColorPalette::Canopy,
+        ColorPalette::Bioluminescence,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -227,6 +229,7 @@ impl ColorPalette {
             ColorPalette::Aurora => "Midnight Aurora",
             ColorPalette::Storm => "Storm",
             ColorPalette::Canopy => "Canopy",
+            ColorPalette::Bioluminescence => "Bioluminescence",
         }
     }
 
@@ -240,6 +243,7 @@ impl ColorPalette {
             ColorPalette::Aurora => 5,
             ColorPalette::Storm => 6,
             ColorPalette::Canopy => 7,
+            ColorPalette::Bioluminescence => 8,
         }
     }
 
@@ -250,13 +254,14 @@ impl ColorPalette {
             ColorPalette::Aurora => 3.0,      // band frequency
             ColorPalette::Storm => 10.0,      // sigmoid steepness
             ColorPalette::Canopy => 3.0,      // trap scale
+            ColorPalette::Bioluminescence => 5.0, // murkiness
             _ => 0.0,
         }
     }
 
     /// Whether this palette uses the coloring_param slider.
     pub fn has_param(&self) -> bool {
-        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy)
+        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::Bioluminescence)
     }
 
     /// Label for the coloring_param slider.
@@ -266,6 +271,7 @@ impl ColorPalette {
             ColorPalette::Aurora => "Band frequency",
             ColorPalette::Storm => "Contrast",
             ColorPalette::Canopy => "Trap scale",
+            ColorPalette::Bioluminescence => "Murkiness",
             _ => "",
         }
     }

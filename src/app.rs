@@ -359,6 +359,7 @@ impl eframe::App for FractalApp {
                                 crate::fractals::ColorPalette::ThinFilm => 0.5..=12.0,
                                 crate::fractals::ColorPalette::Aurora => 0.5..=10.0,
                                 crate::fractals::ColorPalette::Storm => 2.0..=25.0,
+                                crate::fractals::ColorPalette::Bioluminescence => 0.5..=20.0,
                                 _ => 0.0..=1.0,
                             };
                             if ui.add(

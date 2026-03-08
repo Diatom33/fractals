@@ -366,6 +366,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                 "aurora" => fractals::ColorPalette::Aurora,
                 "storm" => fractals::ColorPalette::Storm,
                 "canopy" | "primordial" => fractals::ColorPalette::Canopy,
+                "bioluminescence" | "biolum" | "abyss" => fractals::ColorPalette::Bioluminescence,
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();

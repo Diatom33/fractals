@@ -148,6 +148,47 @@ fn palette_aurora(smooth_iter: f32) -> vec3<f32> {
     return primary + sec_color * glow2;
 }
 
+// -- fBm noise for Storm lightning masking ------------------------------------
+
+// Hash function: maps 2D point to pseudo-random value in [0,1]
+fn hash2d(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, vec3<f32>(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Value noise: smooth interpolation of hashed grid values
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    // Quintic Hermite interpolation for smoother derivatives
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
+    let n00 = hash2d(i + vec2<f32>(0.0, 0.0));
+    let n10 = hash2d(i + vec2<f32>(1.0, 0.0));
+    let n01 = hash2d(i + vec2<f32>(0.0, 1.0));
+    let n11 = hash2d(i + vec2<f32>(1.0, 1.0));
+
+    let nx0 = mix(n00, n10, u.x);
+    let nx1 = mix(n01, n11, u.x);
+    return mix(nx0, nx1, u.y);
+}
+
+// Fractal Brownian motion with dynamic octave count
+fn fbm_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
+    var total: f32 = 0.0;
+    var amplitude: f32 = 0.5;
+    var freq: f32 = 1.0;
+    var max_val: f32 = 0.0;
+    for (var i: i32 = 0; i < num_octaves; i++) {
+        total += amplitude * value_noise(p * freq);
+        max_val += amplitude;
+        amplitude *= 0.5;
+        freq *= 2.0;
+    }
+    return total / max_val;
+}
+
 /// Palette 6: Storm Threshold — gradient-based lightning using sample 0 iterations for neighbors
 fn palette_storm(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     let steepness = params.coloring_param;
@@ -167,6 +208,22 @@ fn palette_storm(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     }
     let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
 
+    // Compute complex-plane coordinates for this pixel (noise moves with fractal)
+    let cx = params.center_hi.x + params.center_lo.x
+           + (f32(px) - f32(params.resolution.x) * 0.5) * params.pixel_step.x;
+    let cy = params.center_hi.y + params.center_lo.y
+           + (f32(py) - f32(params.resolution.y) * 0.5) * params.pixel_step.y;
+    let complex_pos = vec2<f32>(cx, cy);
+
+    // Dynamic octaves: more detail as zoom increases (pixel_step decreases)
+    let octaves = clamp(i32(floor(-log2(params.pixel_step.x)) - 5.0), 3, 12);
+
+    // fBm noise at complex-plane coords with base frequency ~1.5
+    let noise_val = fbm_noise(complex_pos * 1.5, octaves);
+
+    // Soft threshold: lightning fades in/out smoothly at noise boundaries
+    let mask = smoothstep(0.3, 0.7, noise_val);
+
     let log_iter = log2(smooth_iter + 1.0);
     let x_val = fract(log_iter * 0.06);
     let v = 1.0 / (1.0 + exp(-steepness * (x_val - 0.5)));
@@ -177,15 +234,16 @@ fn palette_storm(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     let val = 0.12 + 0.22 * v;
     let base = hsv_to_rgb(hue, sat, val);
 
-    // Edge glow: dim purple at genuinely steep gradients
+    // Edge glow: dim purple at steep gradients, partially masked (always some glow)
     let edge_glow = smoothstep(0.5, 2.0, grad_mag);
+    let glow_mask = mix(0.3, 1.0, mask);
     let glow_color = vec3<f32>(0.25, 0.12, 0.40);
 
-    // Lightning: bright blue-white only at very steep gradients
-    let lightning = smoothstep(1.5, 4.0, grad_mag);
+    // Lightning: bright blue-white only at very steep gradients, fully masked by fBm
+    let lightning = smoothstep(1.5, 4.0, grad_mag) * mask;
     let bolt = vec3<f32>(0.90, 0.90, 1.0);
 
-    let with_glow = mix(base, glow_color, edge_glow);
+    let with_glow = mix(base, glow_color, edge_glow * glow_mask);
     return mix(with_glow, bolt, lightning);
 }
 
@@ -222,6 +280,91 @@ fn palette_canopy(smooth_iter: f32, idx: u32) -> vec3<f32> {
     return mix(canopy * canopy_brightness, jewels, max_i);
 }
 
+// Palette 8: Bioluminescence — deep-sea abyssal glow with depth-aware scattering
+fn palette_biolum(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
+    let murkiness = params.coloring_param;
+    let stride_val = params.stride;
+    let h = params.resolution.y;
+    let w = params.resolution.x;
+    let max_iter_f = f32(params.max_iter);
+    let n = smooth_iter;
+
+    // Gradient from sample 0's iterations
+    var gx: f32 = 0.0;
+    var gy: f32 = 0.0;
+    if px > 0u && px < w - 1u {
+        gx = iterations[py * stride_val + px + 1u]
+           - iterations[py * stride_val + px - 1u];
+    }
+    if py > 0u && py < h - 1u {
+        gy = iterations[(py + 1u) * stride_val + px]
+           - iterations[(py - 1u) * stride_val + px];
+    }
+    let self_emitter = sqrt(gx * gx + gy * gy);
+
+    // Depth-aware glow accumulation from 9x9 neighborhood
+    let sigma_depth = max(murkiness, 0.5);
+    var glow_r: f32 = 0.0;
+    var glow_g: f32 = 0.0;
+    var glow_b: f32 = 0.0;
+
+    for (var dy: i32 = -4; dy <= 4; dy++) {
+        for (var dx: i32 = -4; dx <= 4; dx++) {
+            let nx = i32(px) + dx;
+            let ny = i32(py) + dy;
+            if nx < 1 || nx >= i32(w) - 1 || ny < 1 || ny >= i32(h) - 1 { continue; }
+
+            let n_neighbor = iterations[u32(ny) * stride_val + u32(nx)];
+            if n_neighbor >= max_iter_f { continue; }
+
+            let ngx = iterations[u32(ny) * stride_val + u32(nx + 1)]
+                    - iterations[u32(ny) * stride_val + u32(nx - 1)];
+            let ngy = iterations[(u32(ny) + 1u) * stride_val + u32(nx)]
+                    - iterations[(u32(ny) - 1u) * stride_val + u32(nx)];
+            let n_emit = sqrt(ngx * ngx + ngy * ngy);
+
+            if n_emit < 0.1 { continue; }
+
+            let dist_val = sqrt(f32(dx * dx + dy * dy));
+            let depth_diff = abs(n - n_neighbor);
+            let depth_w = exp(-depth_diff / sigma_depth);
+
+            glow_r += exp(-dist_val / 1.2) * depth_w * n_emit;
+            glow_g += exp(-dist_val / 2.0) * depth_w * n_emit;
+            glow_b += exp(-dist_val / 3.5) * depth_w * n_emit;
+        }
+    }
+
+    let glow_norm = 0.008;
+    let log_iter = log2(n + 1.0);
+    let hue_phase = log_iter * 0.25;
+    let emit_color = vec3<f32>(
+        0.05 + 0.05 * sin(hue_phase + 2.0),
+        0.7 + 0.2 * sin(hue_phase),
+        0.5 + 0.15 * cos(hue_phase)
+    );
+
+    let direct = emit_color * smoothstep(0.2, 2.5, self_emitter);
+
+    let scattered = vec3<f32>(
+        glow_r * glow_norm * 0.2,
+        glow_g * glow_norm * 0.8,
+        glow_b * glow_norm * 0.5
+    );
+
+    let depth_atten = log_iter * 0.12;
+    let atten = vec3<f32>(
+        exp(-depth_atten * murkiness * 0.4),
+        exp(-depth_atten * murkiness * 0.12),
+        exp(-depth_atten * murkiness * 0.08)
+    );
+
+    let water = vec3<f32>(0.003, 0.006, 0.018);
+    let ambient = vec3<f32>(0.0, 0.008, 0.015) * (0.3 + 0.2 * sin(log_iter * 0.7));
+
+    return clamp(water + ambient + (direct + scattered) * atten, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: u32, py: u32) -> vec3<f32> {
     switch params.palette {
         case 1u: { return palette_oklab(smooth_iter); }
@@ -231,6 +374,7 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: 
         case 5u: { return palette_aurora(smooth_iter); }
         case 6u: { return palette_storm(smooth_iter, px, py); }
         case 7u: { return palette_canopy(smooth_iter, py * params.stride + px); }
+        case 8u: { return palette_biolum(smooth_iter, px, py); }
         default: { return palette_classic(smooth_iter); }
     }
 }
