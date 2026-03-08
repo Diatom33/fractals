@@ -9,6 +9,9 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|a| a == "--export") {
         if let Some(path) = args.get(pos + 1) {
+            if is_nebulabrot(&args) {
+                return export_nebulabrot(&args, path);
+            }
             return export_cli(&args, path);
         }
     }
@@ -30,6 +33,262 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(app::FractalApp::new(cc)))),
     )
+}
+
+fn is_nebulabrot(args: &[String]) -> bool {
+    if let Some(pos) = args.iter().position(|a| a == "--type") {
+        if let Some(name) = args.get(pos + 1) {
+            let n = name.to_lowercase();
+            return n == "nebulabrot" || n == "nebula";
+        }
+    }
+    false
+}
+
+fn default_nebula_view(width: u32, height: u32) -> ([f32; 2], [f32; 2]) {
+    let center_x = -0.5f32;
+    let center_y = 0.0f32;
+    let half_y = 1.5f32;
+    let aspect = width as f32 / height as f32;
+    let half_x = half_y * aspect;
+    ([center_x - half_x, center_y - half_y], [center_x + half_x, center_y + half_y])
+}
+
+fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
+    use fractals::{NebulaGpuParams, NebulaFinParams};
+    use std::io::Write;
+
+    let width = args.iter().position(|a| a == "--width")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1920);
+    let height = args.iter().position(|a| a == "--height")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1080);
+    let align = |w: u32| -> u32 { (w + 63) / 64 * 64 };
+    let width = align(width);
+
+    let total_samples: u64 = args.iter().position(|a| a == "--nebula-samples")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(100_000_000);
+
+    let (max_iter_r, max_iter_g, max_iter_b) = if let Some(pos) = args.iter().position(|a| a == "--nebula-iters") {
+        if let Some(val) = args.get(pos + 1) {
+            let parts: Vec<u32> = val.split(',').filter_map(|s| s.parse().ok()).collect();
+            if parts.len() == 3 { (parts[0], parts[1], parts[2]) }
+            else { (5000, 500, 50) }
+        } else { (5000, 500, 50) }
+    } else { (5000, 500, 50) };
+
+    let (view_min, view_max) = if let Some(pos) = args.iter().position(|a| a == "--bounds") {
+        if let Some(val) = args.get(pos + 1) {
+            let parts: Vec<f64> = val.split(',').filter_map(|s| s.parse().ok()).collect();
+            if parts.len() == 4 { ([parts[0] as f32, parts[2] as f32], [parts[1] as f32, parts[3] as f32]) }
+            else { default_nebula_view(width, height) }
+        } else { default_nebula_view(width, height) }
+    } else { default_nebula_view(width, height) };
+
+    let sample_min = [-2.5f32, -1.5f32];
+    let sample_max = [1.5f32, 1.5f32];
+
+    println!("Nebulabrot export: {}x{} -> {}", width, height, path);
+    println!("  Samples: {}, Iters: R={}, G={}, B={}", total_samples, max_iter_r, max_iter_g, max_iter_b);
+    println!("  View: [{}, {}] x [{}, {}]", view_min[0], view_max[0], view_min[1], view_max[1]);
+
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    })).expect("No GPU adapter found");
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor { label: Some("nebulabrot export"), ..Default::default() },
+        None,
+    )).expect("Failed to create device");
+
+    let out_pixels = (width as u64) * (height as u64);
+    let hist_size = out_pixels * 4;
+
+    let mk_buf = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label), size, usage, mapped_at_creation: false,
+    });
+    let stor_rw_dst = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+    let hist_r_buf = mk_buf("histogram_r", hist_size, stor_rw_dst);
+    let hist_g_buf = mk_buf("histogram_g", hist_size, stor_rw_dst);
+    let hist_b_buf = mk_buf("histogram_b", hist_size, stor_rw_dst);
+    let output_buf = mk_buf("output", out_pixels * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let readback_buf = mk_buf("readback", out_pixels * 4, wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ);
+    let hist_readback_buf = mk_buf("hist_readback", hist_size, wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ);
+
+    let sample_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("nebula_sample"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/nebula_sample.wgsl").into()),
+    });
+    let finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("nebula_finalize"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/nebula_finalize.wgsl").into()),
+    });
+
+    let nebula_params_buf = mk_buf("nebula_params", std::mem::size_of::<NebulaGpuParams>() as u64,
+        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+    let fin_params_buf = mk_buf("nebula_fin_params", std::mem::size_of::<NebulaFinParams>() as u64,
+        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+
+    let bgl_uniform = |b: u32| wgpu::BindGroupLayoutEntry {
+        binding: b, visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    };
+    let bgl_storage = |b: u32, ro: bool| wgpu::BindGroupLayoutEntry {
+        binding: b, visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: ro }, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    };
+    macro_rules! be {
+        ($b:expr, $buf:expr) => { wgpu::BindGroupEntry { binding: $b, resource: $buf.as_entire_binding() } };
+    }
+
+    let sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None, entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, false)],
+    });
+    let sample_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("nebula_sample"),
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&sample_layout], push_constant_ranges: &[],
+        })),
+        module: &sample_shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None,
+    });
+    let sample_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &sample_layout,
+        entries: &[be!(0, &nebula_params_buf), be!(1, &hist_r_buf), be!(2, &hist_g_buf), be!(3, &hist_b_buf)],
+    });
+
+    let fin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None, entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, true), bgl_storage(3, true), bgl_storage(4, false)],
+    });
+    let fin_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("nebula_finalize"),
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&fin_layout], push_constant_ranges: &[],
+        })),
+        module: &finalize_shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None,
+    });
+    let fin_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &fin_layout,
+        entries: &[be!(0, &fin_params_buf), be!(1, &hist_r_buf), be!(2, &hist_g_buf), be!(3, &hist_b_buf), be!(4, &output_buf)],
+    });
+
+    let workgroup_size = 256u32;
+    let num_workgroups = 256u32;
+    let threads_per_dispatch = (num_workgroups * workgroup_size) as u64;
+    let samples_per_thread = 64u32;
+    let samples_per_dispatch = threads_per_dispatch * samples_per_thread as u64;
+    let num_dispatches = ((total_samples + samples_per_dispatch - 1) / samples_per_dispatch) as u32;
+
+    let start = std::time::Instant::now();
+    let progress_interval = (num_dispatches / 20).max(1);
+
+    {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.clear_buffer(&hist_r_buf, 0, None);
+        encoder.clear_buffer(&hist_g_buf, 0, None);
+        encoder.clear_buffer(&hist_b_buf, 0, None);
+        queue.submit(std::iter::once(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+    }
+
+    for dispatch_idx in 0..num_dispatches {
+        let nebula_params = NebulaGpuParams {
+            resolution: [width, height], stride: width,
+            max_iter_r, max_iter_g, max_iter_b,
+            samples_per_thread, dispatch_index: dispatch_idx,
+            sample_min, sample_max, view_min, view_max,
+        };
+        queue.write_buffer(&nebula_params_buf, 0, bytemuck::bytes_of(&nebula_params));
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&sample_pipe);
+            pass.set_bind_group(0, &sample_bg, &[]);
+            pass.dispatch_workgroups(num_workgroups, 1, 1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+
+        if (dispatch_idx + 1) % progress_interval == 0 || dispatch_idx == num_dispatches - 1 {
+            device.poll(wgpu::Maintain::Wait);
+            let pct = ((dispatch_idx + 1) as f64 / num_dispatches as f64 * 100.0) as u32;
+            let elapsed = start.elapsed().as_secs_f64();
+            let samples_done = (dispatch_idx as u64 + 1) * samples_per_dispatch;
+            let rate = samples_done as f64 / elapsed / 1e6;
+            print!("\r  Sampling: {}% ({:.0}M samples/sec)", pct, rate);
+            std::io::stdout().flush().ok();
+        }
+    }
+    device.poll(wgpu::Maintain::Wait);
+    println!();
+
+    let find_exposure = |hist_buf: &wgpu::Buffer| -> u32 {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(hist_buf, 0, &hist_readback_buf, 0, hist_size);
+        queue.submit(std::iter::once(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+        let slice = hist_readback_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        let data = slice.get_mapped_range();
+        let values: &[u32] = bytemuck::cast_slice(&data);
+        let mut nonzero: Vec<u32> = values.iter().copied().filter(|&v| v > 0).collect();
+        let exposure = if nonzero.is_empty() { 0 } else {
+            nonzero.sort_unstable();
+            nonzero[((nonzero.len() as f64 * 0.995) as usize).min(nonzero.len() - 1)]
+        };
+        drop(data);
+        hist_readback_buf.unmap();
+        exposure
+    };
+
+    print!("  Computing exposure...");
+    std::io::stdout().flush().ok();
+    let max_r = find_exposure(&hist_r_buf);
+    let max_g = find_exposure(&hist_g_buf);
+    let max_b = find_exposure(&hist_b_buf);
+    println!(" R={}, G={}, B={}", max_r, max_g, max_b);
+
+    if max_r == 0 && max_g == 0 && max_b == 0 {
+        println!("WARNING: All histograms empty. Try increasing --nebula-samples.");
+    }
+
+    let fin_params = NebulaFinParams {
+        resolution: [width, height], stride: width,
+        max_r, max_g, max_b, _pad: [0; 2],
+    };
+    queue.write_buffer(&fin_params_buf, 0, bytemuck::bytes_of(&fin_params));
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&fin_pipe);
+        pass.set_bind_group(0, &fin_bg, &[]);
+        pass.dispatch_workgroups((width + 15) / 16, (height + 15) / 16, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output_buf, 0, &readback_buf, 0, out_pixels * 4);
+    queue.submit(std::iter::once(encoder.finish()));
+    device.poll(wgpu::Maintain::Wait);
+
+    let slice = readback_buf.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv().unwrap().unwrap();
+    let data = slice.get_mapped_range();
+    let img = image::RgbaImage::from_raw(width, height, data.to_vec()).unwrap();
+    img.save(path).unwrap();
+    println!("Done: {}x{}, {} samples, {:.1}s -> {}", width, height, total_samples, start.elapsed().as_secs_f64(), path);
+    Ok(())
 }
 
 fn export_cli(args: &[String], path: &str) -> eframe::Result {

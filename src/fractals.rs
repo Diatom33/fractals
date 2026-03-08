@@ -447,6 +447,35 @@ pub struct PerturbData {
 
 
 /// Compute a reference orbit for any z²+c escape-time variant.
+/// Nebulabrot sampling GPU params. Must match NebulaParams in nebula_sample.wgsl.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct NebulaGpuParams {
+    pub resolution: [u32; 2],
+    pub stride: u32,
+    pub max_iter_r: u32,
+    pub max_iter_g: u32,
+    pub max_iter_b: u32,
+    pub samples_per_thread: u32,
+    pub dispatch_index: u32,
+    pub sample_min: [f32; 2],
+    pub sample_max: [f32; 2],
+    pub view_min: [f32; 2],
+    pub view_max: [f32; 2],
+}
+
+/// Nebulabrot finalize GPU params. Must match NebFinParams in nebula_finalize.wgsl.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct NebulaFinParams {
+    pub resolution: [u32; 2],
+    pub stride: u32,
+    pub max_r: u32,
+    pub max_g: u32,
+    pub max_b: u32,
+    pub _pad: [u32; 2],
+}
+
 /// The variant determines how z is modified before/after squaring.
 /// Stores the raw Z_n (NOT the modified version) — the GPU computes
 /// signs and abs from the stored values as needed.
