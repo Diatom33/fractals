@@ -25,6 +25,29 @@ fn main() -> eframe::Result {
             .with_title("Fractal Explorer"),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             present_mode: wgpu::PresentMode::AutoNoVsync,
+            wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
+                eframe::egui_wgpu::WgpuSetupCreateNew {
+                    device_descriptor: std::sync::Arc::new(|adapter| {
+                        let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                            wgpu::Limits::downlevel_webgl2_defaults()
+                        } else {
+                            wgpu::Limits::default()
+                        };
+                        wgpu::DeviceDescriptor {
+                            label: Some("egui wgpu device"),
+                            required_features: wgpu::Features::default(),
+                            required_limits: wgpu::Limits {
+                                max_texture_dimension_2d: 8192,
+                                max_buffer_size: 1 << 30, // 1GB
+                                max_storage_buffer_binding_size: 1 << 30,
+                                ..base_limits
+                            },
+                            memory_hints: wgpu::MemoryHints::default(),
+                        }
+                    }),
+                    ..Default::default()
+                },
+            ),
             ..Default::default()
         },
         ..Default::default()
