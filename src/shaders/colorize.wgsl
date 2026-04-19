@@ -525,7 +525,9 @@ fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, idx
     // Halo spread widens with activity (soft glow around each post).
     let halo_exp = max(1.5, 6.0 / activity);
     let halo = pow(peak, halo_exp) * 0.35 * activity;
-    let fence_intensity = core + halo;
+    // Clamp so high activity doesn't blow posts to pure white — the blend
+    // below uses this as a weight and [0, 1] keeps colors in gamut.
+    let fence_intensity = min(core + halo, 1.0);
 
     // Post color: body shifts along the post's height (driven by log_iter)
     // from teal-green low → bright green mid → pink flush at tip. This is

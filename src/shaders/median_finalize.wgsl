@@ -412,7 +412,7 @@ fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px:
     let core = pow(peak, 18.0);
     let halo_exp = max(1.5, 6.0 / activity);
     let halo = pow(peak, halo_exp) * 0.35 * activity;
-    let fence_intensity = core + halo;
+    let fence_intensity = min(core + halo, 1.0);
 
     let tip_phase = fract(log_iter * 0.22);
     let green_teal  = vec3<f32>(0.110, 0.780, 0.620);
