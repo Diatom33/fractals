@@ -533,18 +533,20 @@ impl eframe::App for FractalApp {
                         ui.label(egui::RichText::new("Precise coordinates").small().weak());
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("re:").small().weak().monospace());
-                            ui.add(egui::TextEdit::singleline(&mut center_re_str.clone())
-                                .desired_width(ui.available_width() - 50.0)
-                                .font(egui::TextStyle::Monospace));
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(&center_re_str).small().monospace())
+                                .selectable(true)
+                                .truncate());
                             if ui.small_button("Copy").clicked() {
                                 ui.ctx().copy_text(center_re_str.clone());
                             }
                         });
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("im:").small().weak().monospace());
-                            ui.add(egui::TextEdit::singleline(&mut center_im_str.clone())
-                                .desired_width(ui.available_width() - 50.0)
-                                .font(egui::TextStyle::Monospace));
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(&center_im_str).small().monospace())
+                                .selectable(true)
+                                .truncate());
                             if ui.small_button("Copy").clicked() {
                                 ui.ctx().copy_text(center_im_str.clone());
                             }
