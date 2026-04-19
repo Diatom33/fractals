@@ -929,6 +929,20 @@ pub fn compute_mandelbrot_with_bla(
     let orbit_len = orbit.len() as u32;
     let ref_len = two_z.len();
 
+    // BLA tree memory is O(ref_len * log2(ref_len) * 48B). At max_iter around
+    // 250k that's ~240 MB; by 1M it's ~1 GB which exceeds our wgpu buffer
+    // cap and would OOM on the CPU side too. Above this threshold, skip BLA
+    // entirely — per-step perturbation still renders, just slower.
+    const BLA_MAX_REF_LEN: usize = 250_000;
+    if ref_len > BLA_MAX_REF_LEN {
+        return PerturbData {
+            orbit,
+            orbit_len,
+            bla: Vec::new(),
+            bla_num_levels: 0,
+        };
+    }
+
     // BLA tree: number of levels needed to span the orbit.
     let num_levels: u32 = (ref_len.max(2) as f64).log2().ceil() as u32 + 1;
     let total = ref_len * num_levels as usize;

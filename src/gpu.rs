@@ -700,7 +700,11 @@ impl GpuState {
             rebuild_bg = true;
         }
         // BLA storage: ref_len * num_levels, where num_levels ≈ ceil(log2(ref_len)) + 1.
-        let needed_bla = needed * (((needed as f64).log2().ceil() as u32) + 2);
+        // Cap at 250k iterations to bound memory (~240 MB). Above that, BLA is
+        // disabled in compute_mandelbrot_with_bla and per-step perturbation takes
+        // over. Keep buffer size at the cap so we never exceed the 1 GB wgpu limit.
+        let bla_cap = needed.min(250_001);
+        let needed_bla = bla_cap * (((bla_cap as f64).log2().ceil() as u32) + 2);
         if needed_bla > self.bla_max_entries {
             self.bla_max_entries = needed_bla;
             self.bla_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
