@@ -360,33 +360,47 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     return clamp(water + ambient + (direct + scattered) * atten, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// Palette 9: STEVE — pastel lilac/mauve ribbon with green picket-fence posts.
-fn palette_steve(smooth_iter: f32) -> vec3<f32> {
+// Palette 9: STEVE — Mandelbrot boundary = STEVE mauve ribbon (via ∇ smooth_iter
+// like Bioluminescence); exterior = green picket fence with posts oriented
+// parallel to the escape direction (via dz_angle like thin-film).
+fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: u32, py: u32) -> vec3<f32> {
     let k = params.coloring_param;
-    let log_iter = log2(smooth_iter + 1.0);
-    let t = fract(log_iter * 0.55);
+    let stride_val = params.stride;
+    let w = params.resolution.x;
+    let h = params.resolution.y;
 
-    let c0 = vec3<f32>(0.024, 0.008, 0.071);
-    let c1 = vec3<f32>(0.290, 0.122, 0.322);
-    let c2 = vec3<f32>(0.706, 0.541, 0.831);
-    let c3 = vec3<f32>(0.831, 0.659, 0.910);
-    let c4 = vec3<f32>(0.957, 0.863, 0.973);
-    var base: vec3<f32>;
-    if (t < 0.25) {
-        base = mix(c0, c1, smoothstep(0.0, 0.25, t));
-    } else if (t < 0.55) {
-        base = mix(c1, c2, smoothstep(0.25, 0.55, t));
-    } else if (t < 0.70) {
-        base = mix(c2, c3, smoothstep(0.55, 0.70, t));
-    } else if (t < 0.85) {
-        base = mix(c3, c4, smoothstep(0.70, 0.85, t));
-    } else {
-        base = mix(c4, c0, smoothstep(0.85, 1.00, t));
+    var gx: f32 = 0.0;
+    var gy: f32 = 0.0;
+    if px > 0u && px < w - 1u {
+        gx = iterations[py * stride_val + px + 1u]
+           - iterations[py * stride_val + px - 1u];
     }
+    if py > 0u && py < h - 1u {
+        gy = iterations[(py + 1u) * stride_val + px]
+           - iterations[(py - 1u) * stride_val + px];
+    }
+    let grad_mag = sqrt(gx * gx + gy * gy);
 
-    let raw = abs(sin(k * t));
-    let fence = smoothstep(0.92, 0.99, raw);
-    let ribbon_mask = smoothstep(0.35, 0.50, t) * (1.0 - smoothstep(0.80, 0.95, t));
+    let ribbon = smoothstep(0.6, 4.0, grad_mag);
+    let log_iter = log2(smooth_iter + 1.0);
+    let mauve_deep   = vec3<f32>(0.290, 0.122, 0.322); // #4A1F52
+    let mauve_steve  = vec3<f32>(0.706, 0.541, 0.831); // #B48AD4
+    let mauve_light  = vec3<f32>(0.831, 0.659, 0.910); // #D4A8E8
+    let mauve_white  = vec3<f32>(0.957, 0.863, 0.973); // #F4DCF8
+    let hue_drift = 0.5 + 0.5 * sin(log_iter * 0.25);
+    let ribbon_inner = mix(mauve_steve, mauve_light, hue_drift);
+    let ribbon_col = mix(mauve_deep, mix(ribbon_inner, mauve_white, 0.3 * ribbon), ribbon);
+
+    var escape_angle: f32;
+    if dz_mag > 0.0 {
+        escape_angle = dz_angle;
+    } else {
+        escape_angle = atan2(z.y, z.x);
+    }
+    let log_iter_fence = log2(smooth_iter + 1.0);
+    let phase = k * 0.5 * escape_angle + log_iter_fence * 3.0;
+    let raw = abs(sin(phase));
+    let fence = smoothstep(0.80, 0.97, raw);
 
     let green_dark  = vec3<f32>(0.235, 0.910, 0.533);
     let green_light = vec3<f32>(0.612, 1.000, 0.722);
@@ -394,7 +408,10 @@ fn palette_steve(smooth_iter: f32) -> vec3<f32> {
     let green_body  = mix(green_dark, green_light, raw);
     let green_col   = mix(green_body, pink_tip, smoothstep(0.97, 1.00, raw));
 
-    return mix(base, green_col, fence * ribbon_mask);
+    let background = vec3<f32>(0.024, 0.008, 0.071);
+    let fence_weight = fence * (1.0 - ribbon);
+    let exterior = mix(background, green_col, fence_weight);
+    return mix(exterior, ribbon_col, ribbon);
 }
 
 // Palette 10: Inverted Pair — high-contrast sinusoidal bands between complementary colors.
@@ -434,7 +451,7 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: 
         case 6u: { return palette_storm(smooth_iter, px, py); }
         case 7u: { return palette_canopy(smooth_iter, py * params.stride + px); }
         case 8u: { return palette_biolum(smooth_iter, px, py); }
-        case 9u: { return palette_steve(smooth_iter); }
+        case 9u: { return palette_steve(smooth_iter, z, dz_mag, dz_angle, px, py); }
         case 10u: { return palette_inverted_pair(smooth_iter); }
         default: { return palette_classic(smooth_iter); }
     }

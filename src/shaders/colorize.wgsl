@@ -449,61 +449,80 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
     return clamp(water + ambient + (direct + scattered) * atten, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// Palette 9: STEVE — pastel lilac/mauve ribbon with green picket-fence
-// posts alongside the mauve band. Models the Strong Thermal Emission Velocity
-// Enhancement sky feature: desaturated mauve aurora strip with short vertical
-// green columns running parallel to it.
-fn palette_steve(smooth_iter: f32) -> vec3<f32> {
-    let k = params.coloring_param; // post density
-    let log_iter = log2(smooth_iter + 1.0);
-    // Cycle rate tuned so the mauve band repeats across a typical Mandelbrot
-    // boundary: each cycle plants a row of green pickets through the mid-band.
-    let t = fract(log_iter * 0.55);
+// Palette 9: STEVE — the Mandelbrot set boundary IS the STEVE ribbon (mauve glow
+// like Bioluminescence's boundary detection); the exterior is the picket-fence
+// field, with each green picket oriented parallel to the local escape direction
+// (like thin-film's dz_angle bands).
+fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let k = params.coloring_param;                  // post density
+    let stride_val = params.stride;
+    let w = params.resolution.x;
+    let h = params.resolution.y;
+    let px = idx % stride_val;
+    let py = idx / stride_val;
+    let base_off = params.sample_index * stride_val * h;
 
-    // Base ribbon: piecewise gradient through the spec's target stops so the
-    // fence always has the correct mauve substrate.
-    //  0.00 -> #060212 near-black violet
-    //  0.25 -> #4A1F52 deep plum
-    //  0.55 -> #B48AD4 STEVE mauve
-    //  0.70 -> #D4A8E8 lighter mauve
-    //  0.85 -> #F4DCF8 barely-pink white
-    //  1.00 -> back toward dark violet for cycle continuity
-    let c0 = vec3<f32>(0.024, 0.008, 0.071); // #060212
-    let c1 = vec3<f32>(0.290, 0.122, 0.322); // #4A1F52
-    let c2 = vec3<f32>(0.706, 0.541, 0.831); // #B48AD4
-    let c3 = vec3<f32>(0.831, 0.659, 0.910); // #D4A8E8
-    let c4 = vec3<f32>(0.957, 0.863, 0.973); // #F4DCF8
-    var base: vec3<f32>;
-    if (t < 0.25) {
-        base = mix(c0, c1, smoothstep(0.0, 0.25, t));
-    } else if (t < 0.55) {
-        base = mix(c1, c2, smoothstep(0.25, 0.55, t));
-    } else if (t < 0.70) {
-        base = mix(c2, c3, smoothstep(0.55, 0.70, t));
-    } else if (t < 0.85) {
-        base = mix(c3, c4, smoothstep(0.70, 0.85, t));
-    } else {
-        // Fade back to dark so fract wrap doesn't cliff.
-        base = mix(c4, c0, smoothstep(0.85, 1.00, t));
+    // ── Boundary detection via ∇(smooth_iter). High gradient ⇒ near set boundary.
+    var gx: f32 = 0.0;
+    var gy: f32 = 0.0;
+    if px > 0u && px < w - 1u {
+        gx = iterations[base_off + py * stride_val + px + 1u]
+           - iterations[base_off + py * stride_val + px - 1u];
     }
+    if py > 0u && py < h - 1u {
+        gy = iterations[base_off + (py + 1u) * stride_val + px]
+           - iterations[base_off + (py - 1u) * stride_val + px];
+    }
+    let grad_mag = sqrt(gx * gx + gy * gy);
 
-    // Picket fence: thresholded |sin| gives sharp thin columns, not stripes.
-    let raw = abs(sin(k * t));
-    let fence = smoothstep(0.92, 0.99, raw);
+    // ── STEVE ribbon (mauve): peaks where the boundary is. Desaturated lilac
+    //    per spec; slight hue drift along the boundary by iter count so it
+    //    doesn't read as a flat stencil.
+    let ribbon = smoothstep(0.6, 4.0, grad_mag);
+    let log_iter = log2(smooth_iter + 1.0);
+    let mauve_deep   = vec3<f32>(0.290, 0.122, 0.322); // #4A1F52 shoulder
+    let mauve_steve  = vec3<f32>(0.706, 0.541, 0.831); // #B48AD4
+    let mauve_light  = vec3<f32>(0.831, 0.659, 0.910); // #D4A8E8
+    let mauve_white  = vec3<f32>(0.957, 0.863, 0.973); // #F4DCF8
+    let hue_drift = 0.5 + 0.5 * sin(log_iter * 0.25);
+    let ribbon_inner = mix(mauve_steve, mauve_light, hue_drift);
+    // Pull hotter toward white on the peak of the ribbon (highest grad).
+    let ribbon_col = mix(mauve_deep, mix(ribbon_inner, mauve_white, 0.3 * ribbon), ribbon);
 
-    // Ribbon mask: confines fence to the mauve mid-band so the outer calm and
-    // near-black don't get invaded by pickets.
-    let ribbon_mask = smoothstep(0.35, 0.50, t) * (1.0 - smoothstep(0.80, 0.95, t));
+    // ── Picket fence (exterior): posts parallel to the escape direction.
+    //    dz_angle is arg(dz/dc), the direction the orbit "escapes" through —
+    //    the tangent to level curves of iter count. Pickets oriented along
+    //    this direction means their PHASE varies perpendicular to escape,
+    //    producing thin angular fence posts radiating from the set.
+    var escape_angle: f32;
+    if dz_mag > 0.0 {
+        escape_angle = dz_angle;
+    } else {
+        // Perturbation / no-derivative fallback: use arg(z) at bailout.
+        escape_angle = atan2(z.y, z.x);
+    }
+    // Combine angle AND log-iter so posts have vertical (iter) extent and angular
+    // (escape-direction) periodicity. Without the log-iter term, all posts at
+    // the same angle merge into one long radial line; including it breaks them
+    // into discrete pickets along the escape gradient.
+    let log_iter_fence = log2(smooth_iter + 1.0);
+    let phase = k * 0.5 * escape_angle + log_iter_fence * 3.0;
+    let raw = abs(sin(phase));
+    let fence = smoothstep(0.80, 0.97, raw);  // wider activation → visible posts
 
-    // Green body: lerp #3CE888 -> #9CFFB8 by raw (so edges are darker green,
-    // centers brighter green). Then a very narrow pink tip flushes on peaks.
-    let green_dark  = vec3<f32>(0.235, 0.910, 0.533); // #3CE888
-    let green_light = vec3<f32>(0.612, 1.000, 0.722); // #9CFFB8
-    let pink_tip    = vec3<f32>(0.941, 0.659, 0.784); // #F0A8C8
+    // Green body (#3CE888 → #9CFFB8 by raw), pink tip (#F0A8C8) on peaks.
+    let green_dark  = vec3<f32>(0.235, 0.910, 0.533);
+    let green_light = vec3<f32>(0.612, 1.000, 0.722);
+    let pink_tip    = vec3<f32>(0.941, 0.659, 0.784);
     let green_body  = mix(green_dark, green_light, raw);
     let green_col   = mix(green_body, pink_tip, smoothstep(0.97, 1.00, raw));
 
-    return mix(base, green_col, fence * ribbon_mask);
+    // Background: near-black violet #060212. Fence only shows in exterior
+    // (ribbon weak); ribbon dominates on the boundary.
+    let background = vec3<f32>(0.024, 0.008, 0.071);
+    let fence_weight = fence * (1.0 - ribbon);
+    let exterior = mix(background, green_col, fence_weight);
+    return mix(exterior, ribbon_col, ribbon);
 }
 
 // Palette 10: Inverted Pair — high-contrast sinusoidal bands between complementary colors.
@@ -550,7 +569,7 @@ fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, dz_mag: f32, dz_a
         case 6u: { return palette_storm(smooth_iter, idx); }
         case 7u: { return palette_canopy(smooth_iter, idx); }
         case 8u: { return palette_biolum(smooth_iter, idx); }
-        case 9u: { return palette_steve(smooth_iter); }
+        case 9u: { return palette_steve(smooth_iter, z, dz_mag, dz_angle, idx); }
         case 10u: { return palette_inverted_pair(smooth_iter); }
         default: { return palette_classic(smooth_iter); }
     }

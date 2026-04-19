@@ -273,7 +273,7 @@ impl ColorPalette {
     /// These palettes can't be multi-sample averaged — gradient features shift with
     /// sub-pixel offsets, producing noise instead of smooth highlights.
     pub fn uses_neighbor_sampling(&self) -> bool {
-        matches!(self, ColorPalette::Storm | ColorPalette::Bioluminescence)
+        matches!(self, ColorPalette::Storm | ColorPalette::Bioluminescence | ColorPalette::Steve)
     }
 
     /// Whether this palette uses the coloring_param slider.
