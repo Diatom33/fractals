@@ -25,6 +25,10 @@ struct Params {
     coloring_param: f32,
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
+    coloring_param_2: f32,
+    _pad_128a: u32,
+    _pad_128b: u32,
+    _pad_128c: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;

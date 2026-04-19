@@ -39,6 +39,10 @@ struct Params {
     coloring_param: f32,
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
+    coloring_param_2: f32,
+    _pad_128a: u32,
+    _pad_128b: u32,
+    _pad_128c: u32,
 }
 
 struct PerturbParams {
@@ -418,8 +422,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dn_mag2 = dot(dn_real, dn_real);
         var should_rebase = mag2 < dn_mag2;
         if dn_mag2 == 0.0 {
-            // Bounds-clamped reference index (both `select` arms evaluate in WGSL)
-            let ri_safe = min(max(ref_i, 1u), ref_len) - 1u;
+            // Must index the SAME iteration as z_full (ref_orbit[ref_i]), not
+            // ref_i - 1 — otherwise the test becomes a property of the reference
+            // orbit alone (|Z_{n+1}| < ε|Z_n|), which fires spuriously for every
+            // near-center pixel whose δ underflowed in f32, zeroing dn_lo and
+            // showing up as a ring of precision loss around screen center.
+            let ri_safe = min(ref_i, ref_len - 1u);
             let z_ref_re = ref_orbit[ri_safe].x;
             let z_ref_im = ref_orbit[ri_safe].y;
             let z_ref_mag2 = z_ref_re * z_ref_re + z_ref_im * z_ref_im;

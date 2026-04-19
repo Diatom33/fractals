@@ -185,6 +185,7 @@ pub struct FractalParams {
     pub supersampling: u32,   // 1 = off, 2 = 2x2, 3 = 3x3
     pub palette: ColorPalette,
     pub coloring_param: f32,  // palette-specific parameter (thin-film k, aurora freq, storm steepness)
+    pub coloring_param_2: f32, // second palette-specific parameter (optional, per-palette meaning)
     pub use_median: bool,     // true = median iteration SS, false = Oklab accumulation SS
     // Nebulabrot-specific params
     pub nebula_iter_r: u32,
@@ -294,6 +295,27 @@ impl ColorPalette {
             _ => "",
         }
     }
+
+    /// Default second-parameter value (where relevant).
+    pub fn default_param_2(&self) -> f32 {
+        match self {
+            ColorPalette::Steve => 0.22,  // post color cycle rate
+            _ => 0.0,
+        }
+    }
+
+    /// Whether this palette exposes a second slider.
+    pub fn has_param_2(&self) -> bool {
+        matches!(self, ColorPalette::Steve)
+    }
+
+    /// Label for the second slider.
+    pub fn param2_label(&self) -> &'static str {
+        match self {
+            ColorPalette::Steve => "Post hue cycle",
+            _ => "",
+        }
+    }
 }
 
 impl Default for FractalParams {
@@ -313,6 +335,7 @@ impl Default for FractalParams {
             supersampling: 1,
             palette: ColorPalette::Oklab,
             coloring_param: ColorPalette::Oklab.default_param(),
+            coloring_param_2: ColorPalette::Oklab.default_param_2(),
             use_median: true,
             nebula_iter_r: 5000,
             nebula_iter_g: 500,
@@ -450,6 +473,8 @@ impl FractalParams {
             coloring_param: self.coloring_param,
             real_pixel_step: [step_x as f32, step_y as f32],
             noise_seed: [noise_seed_x, noise_seed_y],
+            coloring_param_2: self.coloring_param_2,
+            _pad_128: [0; 3],
         }
     }
 }
@@ -1028,5 +1053,7 @@ pub struct GpuParams {
     pub coloring_param: f32,       // 4 bytes  (offset 92) — palette-specific parameter
     pub real_pixel_step: [f32; 2], // 8 bytes  (offset 96) — always true pixel step (even in perturbation)
     pub noise_seed: [f32; 2],     // 8 bytes  (offset 104) — fBm noise seed from rug center
+    pub coloring_param_2: f32,    // 4 bytes  (offset 112) — second palette-specific parameter
+    pub _pad_128: [u32; 3],       // 12 bytes (offset 116) — pad to 128
 }
-// Total: 112 bytes
+// Total: 128 bytes

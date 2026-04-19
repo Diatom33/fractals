@@ -384,6 +384,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();
+            params.coloring_param_2 = params.palette.default_param_2();
         }
     }
 
@@ -399,7 +400,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     if let Some(pos) = args.iter().position(|a| a == "--iter") {
         if let Some(val) = args.get(pos + 1) {
             if let Ok(i) = val.parse::<u32>() {
-                params.max_iter = i.clamp(10, 50000);
+                params.max_iter = i.clamp(10, 1_000_000);
             }
         }
     }

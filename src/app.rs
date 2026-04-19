@@ -201,6 +201,7 @@ impl FractalApp {
         }
         hash ^= self.params.use_median as u64;
         hash ^= (self.params.coloring_param.to_bits() as u64) << 32;
+        hash ^= self.params.coloring_param_2.to_bits() as u64;
         if self.params.fractal_type.is_nebulabrot() {
             hash ^= self.params.nebula_iter_r as u64;
             hash ^= (self.params.nebula_iter_g as u64) << 16;
@@ -277,7 +278,7 @@ impl eframe::App for FractalApp {
                         ui.label("Max iterations:");
                         if ui
                             .add(
-                                egui::Slider::new(&mut self.params.max_iter, 10..=50000)
+                                egui::Slider::new(&mut self.params.max_iter, 10..=1_000_000)
                                     .logarithmic(true),
                             )
                             .changed()
@@ -349,6 +350,7 @@ impl eframe::App for FractalApp {
                             });
                         if self.params.palette != prev_palette {
                             self.params.coloring_param = self.params.palette.default_param();
+                            self.params.coloring_param_2 = self.params.palette.default_param_2();
                             self.needs_render = true;
                         }
 
@@ -368,6 +370,26 @@ impl eframe::App for FractalApp {
                             if ui.add(
                                 egui::Slider::new(&mut self.params.coloring_param, range)
                                     .step_by(0.1)
+                            ).changed() {
+                                self.needs_render = true;
+                            }
+                        }
+
+                        // Optional second palette-specific slider.
+                        if self.params.palette.has_param_2() {
+                            ui.add_space(2.0);
+                            ui.label(self.params.palette.param2_label());
+                            let range2 = match self.params.palette {
+                                crate::fractals::ColorPalette::Steve => 0.02..=1.0,
+                                _ => 0.0..=1.0,
+                            };
+                            let step2 = match self.params.palette {
+                                crate::fractals::ColorPalette::Steve => 0.01,
+                                _ => 0.1,
+                            };
+                            if ui.add(
+                                egui::Slider::new(&mut self.params.coloring_param_2, range2)
+                                    .step_by(step2)
                             ).changed() {
                                 self.needs_render = true;
                             }

@@ -29,6 +29,10 @@ struct Params {
     coloring_param: f32,
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
+    coloring_param_2: f32,
+    _pad_128a: u32,
+    _pad_128b: u32,
+    _pad_128c: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -532,7 +536,8 @@ fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, idx
     // Post color: body shifts along the post's height (driven by log_iter)
     // from teal-green low → bright green mid → pink flush at tip. This is
     // what gives pickets a proper vertical gradient instead of flat bands.
-    let tip_phase = fract(log_iter * 0.22);
+    let hue_cycle = params.coloring_param_2;  // post color cycle rate
+    let tip_phase = fract(log_iter * hue_cycle);
     let green_teal  = vec3<f32>(0.110, 0.780, 0.620);   // deep teal-green
     let green_body  = vec3<f32>(0.235, 0.910, 0.533);   // #3CE888
     let green_light = vec3<f32>(0.612, 1.000, 0.722);   // #9CFFB8
