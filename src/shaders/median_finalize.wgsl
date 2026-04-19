@@ -377,9 +377,9 @@ fn palette_steve(smooth_iter: f32) -> vec3<f32> {
     let fence = smoothstep(0.92, 0.99, raw);
     let ribbon_mask = smoothstep(0.35, 0.50, t) * (1.0 - smoothstep(0.80, 0.95, t));
 
-    let green_body = vec3<f32>(0.235, 0.910, 0.533);
-    let green_tip  = vec3<f32>(0.612, 1.000, 0.722);
-    let fence_col  = mix(green_body, green_tip, raw);
+    let green_body = vec3<f32>(0.235, 0.910, 0.533);  // #3CE888
+    let pink_tip   = vec3<f32>(0.941, 0.659, 0.784);  // #F0A8C8
+    let fence_col  = mix(green_body, pink_tip, fence);
 
     return mix(base, fence_col, fence * ribbon_mask);
 }

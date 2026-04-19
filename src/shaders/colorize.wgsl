@@ -474,10 +474,12 @@ fn palette_steve(smooth_iter: f32) -> vec3<f32> {
     // near-black don't get invaded by pickets.
     let ribbon_mask = smoothstep(0.35, 0.50, t) * (1.0 - smoothstep(0.80, 0.95, t));
 
-    // Fence color (green body, with a soft pink tip via raw interpolation).
+    // Fence color: bright green body with a soft pink tip at post peaks.
+    // `fence` is 0 at post edges and 1 at the brightest center — blend by it
+    // so the body is visible at the edges and the pink tip only on peaks.
     let green_body = vec3<f32>(0.235, 0.910, 0.533);  // #3CE888
-    let green_tip  = vec3<f32>(0.612, 1.000, 0.722);  // #9CFFB8
-    let fence_col  = mix(green_body, green_tip, raw);
+    let pink_tip   = vec3<f32>(0.941, 0.659, 0.784);  // #F0A8C8
+    let fence_col  = mix(green_body, pink_tip, fence);
 
     return mix(base, fence_col, fence * ribbon_mask);
 }
