@@ -3,7 +3,7 @@
 /// at the output resolution with a coordinate offset, colorized, and
 /// accumulated into a float buffer. A final pass normalizes and packs to RGBA.
 
-use crate::fractals::{FractalParams, GpuParams, NebulaGpuParams, NebulaFinParams, PerturbGpuParams};
+use crate::fractals::{BlaCoeff, FractalParams, GpuParams, NebulaGpuParams, NebulaFinParams, PerturbGpuParams};
 use rug::Float;
 
 /// Max sub-pixel samples for median mode. 9 (3×3) keeps the iterations buffer
@@ -57,6 +57,8 @@ pub struct GpuState {
     perturb_bind_group: wgpu::BindGroup,
     ref_orbit_buffer: wgpu::Buffer,
     perturb_params_buffer: wgpu::Buffer,
+    bla_buffer: wgpu::Buffer,
+    bla_max_entries: u32,
 
     // CPU readback buffer (for egui::ColorImage upload)
     readback_buffer: wgpu::Buffer,
@@ -70,7 +72,8 @@ pub struct GpuState {
     // Perturbation state
     pub using_perturbation: bool,
     ref_orbit_max_entries: u32, // current capacity of ref_orbit_buffer
-    cached_ref_orbit: Option<(Float, Float, u32, u32, u32, [f32; 2])>, // (center_re, center_im, max_iter, orbit_len, fractal_type, julia_c)
+    // Cache key: (center_re, center_im, max_iter, orbit_len, fractal_type, julia_c, half_range_x, bla_num_levels)
+    cached_ref_orbit: Option<(Float, Float, u32, u32, u32, [f32; 2], f64, u32)>,
 
     // Staging buffer for batched sample params (avoids per-sample GPU sync)
     params_staging_buffer: wgpu::Buffer,
@@ -192,6 +195,15 @@ impl GpuState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // BLA tree storage. Sized for ref_orbit_max_entries × initial num_levels (~17).
+        // Will be resized when reference orbit grows or BLA tree dimensions change.
+        let bla_max_entries = ref_orbit_max_entries * 20;
+        let bla_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bla"),
+            size: bla_max_entries as u64 * std::mem::size_of::<BlaCoeff>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         // Bind group layouts
         let escape_bind_group_layout =
@@ -274,6 +286,7 @@ impl GpuState {
                     bgl_entry_storage(3, true),                        // ref_orbit (read)
                     bgl_entry(4, wgpu::BufferBindingType::Uniform),   // perturb_params
                     bgl_entry_storage(5, false),                       // orbit_traps (rw)
+                    bgl_entry_storage(6, true),                        // bla (read)
                 ],
             });
         let perturb_pipeline = create_pipeline(device, &perturb_shader, &perturb_bind_group_layout);
@@ -289,6 +302,7 @@ impl GpuState {
                 bg_entry(3, &ref_orbit_buffer),
                 bg_entry(4, &perturb_params_buffer),
                 bg_entry(5, &orbit_trap_buffer),
+                bg_entry(6, &bla_buffer),
             ],
         });
 
@@ -483,6 +497,8 @@ impl GpuState {
             perturb_bind_group,
             ref_orbit_buffer,
             perturb_params_buffer,
+            bla_buffer,
+            bla_max_entries,
             readback_buffer,
             width,
             display_width,
@@ -624,6 +640,7 @@ impl GpuState {
                     bg_entry(3, &self.ref_orbit_buffer),
                     bg_entry(4, &self.perturb_params_buffer),
                     bg_entry(5, &self.orbit_trap_buffer),
+                    bg_entry(6, &self.bla_buffer),
                 ],
             });
 
@@ -668,9 +685,10 @@ impl GpuState {
         }
     }
 
-    /// Ensure ref_orbit_buffer is large enough for the given max_iter.
+    /// Ensure ref_orbit_buffer and bla_buffer are large enough for the given max_iter.
     fn ensure_ref_orbit_capacity(&mut self, max_iter: u32) {
         let needed = max_iter + 1; // +1 for the escaping value
+        let mut rebuild_bg = false;
         if needed > self.ref_orbit_max_entries {
             self.ref_orbit_max_entries = needed;
             self.ref_orbit_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -679,7 +697,21 @@ impl GpuState {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            // Rebuild perturbation bind group with new buffer
+            rebuild_bg = true;
+        }
+        // BLA storage: ref_len * num_levels, where num_levels ≈ ceil(log2(ref_len)) + 1.
+        let needed_bla = needed * (((needed as f64).log2().ceil() as u32) + 2);
+        if needed_bla > self.bla_max_entries {
+            self.bla_max_entries = needed_bla;
+            self.bla_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bla"),
+                size: self.bla_max_entries as u64 * std::mem::size_of::<BlaCoeff>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            rebuild_bg = true;
+        }
+        if rebuild_bg {
             self.perturb_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("perturb bg"),
                 layout: &self.perturb_bind_group_layout,
@@ -690,6 +722,7 @@ impl GpuState {
                     bg_entry(3, &self.ref_orbit_buffer),
                     bg_entry(4, &self.perturb_params_buffer),
                     bg_entry(5, &self.orbit_trap_buffer),
+                    bg_entry(6, &self.bla_buffer),
                 ],
             });
         }
@@ -722,54 +755,89 @@ impl GpuState {
         let ps_mantissa_x = (step_x / scale) as f32;
         let ps_mantissa_y = (step_y / scale) as f32;
 
-        // Upload reference orbit if using perturbation (cached to avoid recomputation)
+        // Upload reference orbit if using perturbation (cached to avoid recomputation).
+        // BLA tree built only for plain Mandelbrot — other variants use single-step perturbation.
         if use_perturb {
             let ft_idx = params.fractal_type.shader_index();
+            let is_mandelbrot = params.fractal_type == crate::fractals::FractalType::Mandelbrot;
             let need_recompute = match &self.cached_ref_orbit {
                 None => true,
-                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc)) => {
+                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc, prev_hr, _prev_bla)) => {
                     *prev_re != params.center_re
                         || *prev_im != params.center_im
                         || *prev_iter < params.max_iter
                         || *prev_ft != ft_idx
                         || *prev_jc != params.julia_c
+                        || *prev_hr != params.half_range_x
                 }
             };
 
             if need_recompute {
                 self.ensure_ref_orbit_capacity(params.max_iter);
-                let julia_c = if params.fractal_type == crate::fractals::FractalType::Julia {
-                    Some((params.julia_c[0] as f64, params.julia_c[1] as f64))
+                let (orbit_len, bla_num_levels) = if is_mandelbrot {
+                    let delta_c_max = (params.half_range_x.hypot(params.half_range_y)).max(1e-300);
+                    let eps = 1.0 / 1024.0;
+                    let perturb_data = crate::fractals::compute_mandelbrot_with_bla(
+                        &params.center_re, &params.center_im,
+                        params.max_iter, pixel_step,
+                        delta_c_max, eps,
+                    );
+                    self.queue.write_buffer(
+                        &self.ref_orbit_buffer,
+                        0,
+                        bytemuck::cast_slice(&perturb_data.orbit),
+                    );
+                    if !perturb_data.bla.is_empty() {
+                        self.queue.write_buffer(
+                            &self.bla_buffer,
+                            0,
+                            bytemuck::cast_slice(&perturb_data.bla),
+                        );
+                    }
+                    (perturb_data.orbit_len, perturb_data.bla_num_levels)
                 } else {
-                    None
+                    let julia_c = if params.fractal_type == crate::fractals::FractalType::Julia {
+                        Some((params.julia_c[0] as f64, params.julia_c[1] as f64))
+                    } else {
+                        None
+                    };
+                    let perturb_data = crate::fractals::compute_variant_reference_orbit(
+                        &params.center_re, &params.center_im,
+                        params.max_iter, pixel_step,
+                        params.fractal_type, julia_c,
+                    );
+                    self.queue.write_buffer(
+                        &self.ref_orbit_buffer,
+                        0,
+                        bytemuck::cast_slice(&perturb_data.orbit),
+                    );
+                    (perturb_data.orbit_len, 0)
                 };
-                let perturb_data = crate::fractals::compute_variant_reference_orbit(
-                    &params.center_re, &params.center_im,
-                    params.max_iter, pixel_step,
-                    params.fractal_type, julia_c,
-                );
-                self.queue.write_buffer(
-                    &self.ref_orbit_buffer,
-                    0,
-                    bytemuck::cast_slice(&perturb_data.orbit),
-                );
                 let perturb_gpu = PerturbGpuParams {
-                    ref_orbit_len: perturb_data.orbit_len,
+                    ref_orbit_len: orbit_len,
                     pixel_step_exp: ps_exp,
-                    _pad: [0; 2],
+                    bla_num_levels,
+                    _pad: 0,
                 };
                 self.queue.write_buffer(
                     &self.perturb_params_buffer,
                     0,
                     bytemuck::bytes_of(&perturb_gpu),
                 );
-                self.cached_ref_orbit = Some((params.center_re.clone(), params.center_im.clone(), params.max_iter, perturb_data.orbit_len, ft_idx, params.julia_c));
+                self.cached_ref_orbit = Some((
+                    params.center_re.clone(), params.center_im.clone(),
+                    params.max_iter, orbit_len, ft_idx, params.julia_c,
+                    params.half_range_x, bla_num_levels,
+                ));
             } else {
-                let orbit_len = self.cached_ref_orbit.as_ref().unwrap().3;
+                let cached = self.cached_ref_orbit.as_ref().unwrap();
+                let orbit_len = cached.3;
+                let bla_num_levels = cached.7;
                 let perturb_gpu = PerturbGpuParams {
                     ref_orbit_len: orbit_len,
                     pixel_step_exp: ps_exp,
-                    _pad: [0; 2],
+                    bla_num_levels,
+                    _pad: 0,
                 };
                 self.queue.write_buffer(
                     &self.perturb_params_buffer,

@@ -495,10 +495,37 @@ fn hash_to_float(mut x: u32) -> f32 {
 pub struct PerturbGpuParams {
     pub ref_orbit_len: u32,
     pub pixel_step_exp: i32,
-    pub _pad: [u32; 2],
+    pub bla_num_levels: u32,    // 0 = BLA disabled
+    pub _pad: u32,
 }
 
-/// Data for perturbation rendering: reference orbit + metadata.
+/// One BLA node: applies 2^level perturbation iterations as δ ← A·δ + B·δc.
+/// A and B use mantissa+exponent for extended range (coefficients can grow exponentially).
+/// Layout matches WGSL struct (32 bytes, 16-byte aligned).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BlaCoeff {
+    pub a: [f32; 2],         // 8 bytes — A mantissa (complex)
+    pub b: [f32; 2],         // 8 bytes — B mantissa (complex)
+    pub a_exp: i32,          // 4 bytes
+    pub b_exp: i32,          // 4 bytes
+    pub radius_log2: f32,    // 4 bytes — node valid when log2(|δ|) ≤ radius_log2
+    pub _pad: u32,           // 4 bytes
+}
+
+impl Default for BlaCoeff {
+    fn default() -> Self {
+        // Default = invalid node (very negative radius_log2 → never selected)
+        Self {
+            a: [0.0, 0.0], b: [0.0, 0.0],
+            a_exp: 0, b_exp: 0,
+            radius_log2: -1.0e30,
+            _pad: 0,
+        }
+    }
+}
+
+/// Data for perturbation rendering: reference orbit + metadata + optional BLA tree.
 pub struct PerturbData {
     /// Reference orbit Z_n as double-single f32 quads: [re_hi, im_hi, re_lo, im_lo].
     /// Double-single gives ~48-bit mantissa (~15 decimal digits) vs f32's ~7 digits,
@@ -506,6 +533,99 @@ pub struct PerturbData {
     pub orbit: Vec<[f32; 4]>,
     /// How many iterations before reference escaped (or max_iter).
     pub orbit_len: u32,
+    /// Optional BLA tree (Mandelbrot only). Layout: [level][n], padded so each
+    /// level has ref_len entries. Entry at (level, n) covers iterations [n, n+2^level).
+    /// Empty if BLA wasn't built.
+    pub bla: Vec<BlaCoeff>,
+    /// Number of BLA levels. 0 = BLA not built.
+    pub bla_num_levels: u32,
+}
+
+/// Extended-range complex number: (re + i·im) · 2^exp. Used for BLA construction
+/// where coefficients can grow/shrink exponentially with iteration count.
+/// Mantissas held in f64 for combine accuracy; final storage truncates to f32.
+#[derive(Debug, Clone, Copy)]
+struct ExtComplex {
+    re: f64,
+    im: f64,
+    exp: i32,
+}
+
+impl ExtComplex {
+    const ZERO: Self = Self { re: 0.0, im: 0.0, exp: 0 };
+
+    fn from_rug(re: &Float, im: &Float) -> Self {
+        let mut c = Self {
+            re: re.to_f64(),
+            im: im.to_f64(),
+            exp: 0,
+        };
+        c.renormalize();
+        c
+    }
+
+    /// Re-anchor mantissa so max(|re|, |im|) is in [1, 2).
+    fn renormalize(&mut self) {
+        let mag = self.re.abs().max(self.im.abs());
+        if mag > 0.0 && mag.is_finite() {
+            let shift = mag.log2().floor() as i32;
+            let scale = (-shift as f64).exp2();
+            self.re *= scale;
+            self.im *= scale;
+            self.exp += shift;
+        } else {
+            *self = Self::ZERO;
+        }
+    }
+
+    fn mul(self, other: Self) -> Self {
+        let mut r = Self {
+            re: self.re * other.re - self.im * other.im,
+            im: self.re * other.im + self.im * other.re,
+            exp: self.exp + other.exp,
+        };
+        r.renormalize();
+        r
+    }
+
+    fn add(self, other: Self) -> Self {
+        if self.re == 0.0 && self.im == 0.0 { return other; }
+        if other.re == 0.0 && other.im == 0.0 { return self; }
+        let exp = self.exp.max(other.exp);
+        let s_scale = (self.exp - exp) as f64;
+        let o_scale = (other.exp - exp) as f64;
+        let s_factor = s_scale.exp2();
+        let o_factor = o_scale.exp2();
+        let mut r = Self {
+            re: self.re * s_factor + other.re * o_factor,
+            im: self.im * s_factor + other.im * o_factor,
+            exp,
+        };
+        r.renormalize();
+        r
+    }
+
+    /// log2 of magnitude: log2(|self|) = exp + log2(sqrt(re²+im²)).
+    /// Returns very negative for zero.
+    fn log2_mag(self) -> f64 {
+        let m2 = self.re * self.re + self.im * self.im;
+        if m2 > 0.0 {
+            self.exp as f64 + 0.5 * m2.log2()
+        } else {
+            -1.0e30
+        }
+    }
+
+    fn to_coeff_a(self, b: Self, radius_log2: f32) -> BlaCoeff {
+        BlaCoeff {
+            a: [self.re as f32, self.im as f32],
+            b: [b.re as f32, b.im as f32],
+            a_exp: self.exp,
+            b_exp: b.exp,
+            radius_log2,
+            _pad: 0,
+        }
+    }
 }
 
 
@@ -680,7 +800,163 @@ pub fn compute_variant_reference_orbit(
     }
 
     let orbit_len = orbit.len() as u32;
-    PerturbData { orbit, orbit_len }
+    PerturbData { orbit, orbit_len, bla: Vec::new(), bla_num_levels: 0 }
+}
+
+/// Mandelbrot-only reference orbit + BLA tree. The BLA tree lets the GPU skip
+/// many iterations at once when |δ| stays inside a validity radius.
+///
+/// Tree layout: flat array indexed as `bla[n * num_levels + level]`. Entry at
+/// (n, level) covers iterations [n, n + 2^level). Each level k entry merges
+/// two level-(k-1) entries with offset 2^(k-1).
+///
+/// At level 0: A = 2·Z_n, B = 1, radius = eps · |2 Z_n|.
+/// At level k+1: A = A2·A1, B = A2·B1 + B2, radius = min(r1, (r2 − |B1|·|δc_max|) / |A1|).
+pub fn compute_mandelbrot_with_bla(
+    center_re: &Float,
+    center_im: &Float,
+    max_iter: u32,
+    pixel_step: f64,
+    delta_c_max: f64,
+    eps: f64,
+) -> PerturbData {
+    let zoom_digits = if pixel_step > 0.0 {
+        (-pixel_step.log10()).max(16.0) as u32
+    } else {
+        64
+    };
+    let precision = (zoom_digits * 4 + 64).max(128).max(center_re.prec());
+
+    let c_re = Float::with_val(precision, center_re);
+    let c_im = Float::with_val(precision, center_im);
+    let mut z_re = Float::with_val(precision, 0.0);
+    let mut z_im = Float::with_val(precision, 0.0);
+    let mut zr2 = Float::new(precision);
+    let mut zi2 = Float::new(precision);
+    let mut zri = Float::new(precision);
+
+    let mut orbit: Vec<[f32; 4]> = Vec::with_capacity(max_iter as usize + 1);
+    // Cache 2·Z_n as ExtComplex for level-0 BLA construction
+    let mut two_z: Vec<ExtComplex> = Vec::with_capacity(max_iter as usize + 1);
+    let escape_r2 = 256.0_f64;
+
+    for _ in 0..max_iter {
+        let zr_f64 = z_re.to_f64();
+        let zi_f64 = z_im.to_f64();
+        let zr_hi = zr_f64 as f32;
+        let zr_lo = (zr_f64 - zr_hi as f64) as f32;
+        let zi_hi = zi_f64 as f32;
+        let zi_lo = (zi_f64 - zi_hi as f64) as f32;
+        orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
+
+        // Capture 2·Z_n at full rug precision before iterating
+        let two_zr = Float::with_val(precision, &z_re * 2);
+        let two_zi = Float::with_val(precision, &z_im * 2);
+        two_z.push(ExtComplex::from_rug(&two_zr, &two_zi));
+
+        // Standard Mandelbrot: z = z² + c
+        zr2.assign(z_re.square_ref());
+        zi2.assign(z_im.square_ref());
+        zri.assign(&z_re * &z_im);
+        z_re.assign(&zr2 - &zi2);
+        z_re += &c_re;
+        z_im.assign(&zri << 1u32);
+        z_im += &c_im;
+
+        let zr = z_re.to_f64();
+        let zi = z_im.to_f64();
+        if zr * zr + zi * zi > escape_r2 {
+            let zr_hi = zr as f32;
+            let zr_lo = (zr - zr_hi as f64) as f32;
+            let zi_hi = zi as f32;
+            let zi_lo = (zi - zi_hi as f64) as f32;
+            orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
+            break;
+        }
+    }
+
+    let orbit_len = orbit.len() as u32;
+    let ref_len = two_z.len();
+
+    // BLA tree: number of levels needed to span the orbit.
+    let num_levels: u32 = (ref_len.max(2) as f64).log2().ceil() as u32 + 1;
+    let total = ref_len * num_levels as usize;
+    let mut bla = vec![BlaCoeff::default(); total];
+
+    // Level 0: A = 2·Z_n, B = 1, radius = eps · |2 Z_n|.
+    // When |2Z_n| is tiny, radius is tiny too — pixel won't use BLA there, falls back to single step.
+    let b0 = ExtComplex { re: 1.0, im: 0.0, exp: 0 };
+    for n in 0..ref_len {
+        let a = two_z[n];
+        let log2_a = a.log2_mag();
+        // radius = eps · |A| → log2(radius) = log2(eps) + log2(|A|)
+        let radius_log2 = if log2_a > -1.0e29 {
+            (eps.log2() + log2_a) as f32
+        } else {
+            -1.0e30
+        };
+        bla[n * num_levels as usize] = a.to_coeff_a(b0, radius_log2);
+    }
+
+    // Higher levels: combine two level-(k-1) entries with stride 2^(k-1).
+    let log_dc = if delta_c_max > 0.0 { delta_c_max.log2() } else { -1.0e30 };
+    for level in 1..num_levels as usize {
+        let stride = 1usize << (level - 1);
+        for n in 0..ref_len {
+            let n_mid = n + stride;
+            if n_mid >= ref_len {
+                // Can't combine — leave as default (invalid).
+                continue;
+            }
+            let prev = level - 1;
+            let bla1 = bla[n * num_levels as usize + prev];
+            let bla2 = bla[n_mid * num_levels as usize + prev];
+
+            // Skip if either half is invalid (shouldn't happen at level 1+ from valid level 0)
+            if bla1.radius_log2 < -1.0e29 || bla2.radius_log2 < -1.0e29 {
+                continue;
+            }
+
+            let a1 = ExtComplex { re: bla1.a[0] as f64, im: bla1.a[1] as f64, exp: bla1.a_exp };
+            let b1 = ExtComplex { re: bla1.b[0] as f64, im: bla1.b[1] as f64, exp: bla1.b_exp };
+            let a2 = ExtComplex { re: bla2.a[0] as f64, im: bla2.a[1] as f64, exp: bla2.a_exp };
+            let b2 = ExtComplex { re: bla2.b[0] as f64, im: bla2.b[1] as f64, exp: bla2.b_exp };
+
+            let a = a2.mul(a1);
+            let b = a2.mul(b1).add(b2);
+
+            // radius = min(r1, max(0, (r2 - |B1|·|δc_max|) / |A1|))
+            let log_a1 = a1.log2_mag();
+            let log_b1 = b1.log2_mag();
+            let log_b1_dc = log_b1 + log_dc;
+            let r2 = bla2.radius_log2 as f64;
+
+            // Compute log2(2^r2 - 2^log_b1_dc) safely.
+            let diff_log = if r2 > log_b1_dc {
+                let diff = log_b1_dc - r2;
+                let factor = 1.0 - diff.exp2();
+                if factor > 0.0 { r2 + factor.log2() } else { -1.0e30 }
+            } else {
+                -1.0e30
+            };
+
+            let candidate = if diff_log > -1.0e29 {
+                diff_log - log_a1
+            } else {
+                -1.0e30
+            };
+            let combined_radius = (bla1.radius_log2 as f64).min(candidate);
+
+            bla[n * num_levels as usize + level] = a.to_coeff_a(b, combined_radius as f32);
+        }
+    }
+
+    PerturbData {
+        orbit,
+        orbit_len,
+        bla,
+        bla_num_levels: num_levels,
+    }
 }
 
 /// GPU-side uniform struct. Must match WGSL layout exactly.

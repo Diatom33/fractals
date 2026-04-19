@@ -43,8 +43,20 @@ struct Params {
 struct PerturbParams {
     ref_orbit_len: u32,
     pixel_step_exp: i32,
-    _pad1: u32,
-    _pad2: u32,
+    bla_num_levels: u32,    // 0 disables BLA (per-step perturbation only)
+    _pad: u32,
+}
+
+// One BLA node: applies 2^level iterations as δ ← A·δ + B·δc.
+// A and B mantissas are f32 with separate i32 exponents for extended range.
+// Tree layout: bla[n * num_levels + level] covers iterations [n, n + 2^level).
+struct BlaCoeff {
+    a: vec2<f32>,
+    b: vec2<f32>,
+    a_exp: i32,
+    b_exp: i32,
+    radius_log2: f32,    // node valid when log2(|δ|) ≤ radius_log2
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -53,6 +65,7 @@ struct PerturbParams {
 @group(0) @binding(3) var<storage, read> ref_orbit: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> perturb: PerturbParams;
 @group(0) @binding(5) var<storage, read_write> orbit_traps: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> bla_tree: array<BlaCoeff>;
 
 // Complex multiply
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -120,139 +133,197 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var iter: u32 = max_i;
     var ref_i: u32 = 0u;
+    var i: u32 = 0u;
 
-    for (var i: u32 = 0u; i < max_i; i++) {
+    let bla_enabled = perturb.bla_num_levels > 0u && ft == 0u;
+    let max_lvl = perturb.bla_num_levels;
+
+    loop {
+        if i >= max_i { break; }
         if ref_i >= ref_len { break; }
 
-        // Read Z_n as double-single: (re_hi, im_hi, re_lo, im_lo)
-        let Zn = ref_orbit[ref_i];
-        let Zn_re_hi = Zn.x;
-        let Zn_im_hi = Zn.y;
-        let Zn_re_lo = Zn.z;
-        let Zn_im_lo = Zn.w;
-
-        // ── Pre-square modification ─────────────────────────────────
-        // Compute Z_eff and δ_eff based on fractal type.
-        // The perturbation formula is: δ' = 2·Z_eff·δ_eff + δ_eff² + δ_c
-        var Zeff_re_hi = Zn_re_hi;
-        var Zeff_im_hi = Zn_im_hi;
-        var Zeff_re_lo = Zn_re_lo;
-        var Zeff_im_lo = Zn_im_lo;
-        var deff_m = dn_m;
-
-        if ft == 2u {
-            // Burning Ship: use sign of FULL z (Z + delta), not just reference Z.
-            // Critical after rebasing (Z=0, delta=z_full) and near fold lines.
-            let dn_real_pre = ldexp_v2(dn_m, dn_e);
-            let sr = signf(Zn_re_hi + dn_real_pre.x);
-            let si = signf(Zn_im_hi + dn_real_pre.y);
-            Zeff_re_hi = sr * Zn_re_hi;
-            Zeff_im_hi = si * Zn_im_hi;
-            Zeff_re_lo = sr * Zn_re_lo;
-            Zeff_im_lo = si * Zn_im_lo;
-            deff_m = vec2<f32>(sr * dn_m.x, si * dn_m.y);
-        } else if ft == 7u {
-            // Tricorn: Z_eff = conj(Z), δ_eff = conj(δ) — always negate imag
-            Zeff_im_hi = -Zn_im_hi;
-            Zeff_im_lo = -Zn_im_lo;
-            deff_m = vec2<f32>(dn_m.x, -dn_m.y);
+        // ── Try BLA stepping (Mandelbrot only) ────────────────────────
+        var step: u32 = 0u;
+        if bla_enabled && ref_i > 0u {
+            // log2(|δ|): dn_m is normalized so |dn_m| ∈ [1, 2). Use exact.
+            let dn_mag2 = dn_m.x * dn_m.x + dn_m.y * dn_m.y;
+            if dn_mag2 > 0.0 {
+                let delta_log2 = f32(dn_e) + 0.5 * log2(dn_mag2);
+                // Walk levels from highest down; first valid wins.
+                var L = max_lvl;
+                loop {
+                    if L == 0u { break; }
+                    L = L - 1u;
+                    if L >= 31u { continue; }     // shift safety
+                    let skip = 1u << L;
+                    if (i + skip) > max_i { continue; }
+                    if (ref_i + skip) > ref_len { continue; }
+                    let node = bla_tree[ref_i * max_lvl + L];
+                    if node.radius_log2 >= delta_log2 {
+                        // Apply BLA: δ ← A·δ + B·δc (extended-range complex math).
+                        let term_a_m = vec2<f32>(
+                            node.a.x * dn_m.x - node.a.y * dn_m.y,
+                            node.a.x * dn_m.y + node.a.y * dn_m.x,
+                        );
+                        let term_a_e = node.a_exp + dn_e;
+                        let term_b_m = vec2<f32>(
+                            node.b.x * dc_m.x - node.b.y * dc_m.y,
+                            node.b.x * dc_m.y + node.b.y * dc_m.x,
+                        );
+                        let term_b_e = node.b_exp + dc_e;
+                        let e_max = max(term_a_e, term_b_e);
+                        dn_m = ldexp_v2(term_a_m, term_a_e - e_max)
+                             + ldexp_v2(term_b_m, term_b_e - e_max);
+                        dn_e = e_max;
+                        // Renormalize
+                        let mag = max(abs(dn_m.x), abs(dn_m.y));
+                        if mag > 0.0 {
+                            let shift_val = i32(floor(log2(mag)));
+                            dn_m = ldexp_v2(dn_m, -shift_val);
+                            dn_e = dn_e + shift_val;
+                        }
+                        ref_i = ref_i + skip;
+                        step = skip;
+                        break;
+                    }
+                }
+            }
         }
 
-        // ── Standard perturbation: 2·Z_eff·δ_eff + δ_eff² ─────────
-        // Term 1: 2·Z_eff·δ_eff (complex multiply with double-single Z_eff)
-        let a = fma(Zeff_re_hi, deff_m.x, Zeff_re_lo * deff_m.x);
-        let b = fma(Zeff_im_hi, deff_m.y, Zeff_im_lo * deff_m.y);
-        let c = fma(Zeff_re_hi, deff_m.y, Zeff_re_lo * deff_m.y);
-        let d = fma(Zeff_im_hi, deff_m.x, Zeff_im_lo * deff_m.x);
-        let t1 = vec2<f32>(2.0 * (a - b), 2.0 * (c + d));
-        let t1_e = dn_e;
+        // ── Single-step perturbation ──────────────────────────────────
+        var Zn_re_hi: f32 = 0.0;
+        var Zn_im_hi: f32 = 0.0;
+        if step == 0u {
+            let Zn = ref_orbit[ref_i];
+            Zn_re_hi = Zn.x;
+            Zn_im_hi = Zn.y;
+            let Zn_re_lo = Zn.z;
+            let Zn_im_lo = Zn.w;
 
-        // Term 2: δ_eff² (complex square of delta mantissa)
-        let t2 = vec2<f32>(
-            deff_m.x * deff_m.x - deff_m.y * deff_m.y,
-            2.0 * deff_m.x * deff_m.y,
-        );
-        let t2_e = 2 * dn_e;
+            // ── Pre-square modification ─────────────────────────────
+            var Zeff_re_hi = Zn_re_hi;
+            var Zeff_im_hi = Zn_im_hi;
+            var Zeff_re_lo = Zn_re_lo;
+            var Zeff_im_lo = Zn_im_lo;
+            var deff_m = dn_m;
 
-        // Sum terms (with or without δ_c)
-        var e_new: i32;
-        var sum: vec2<f32>;
-        if is_julia {
-            e_new = max(t1_e, t2_e);
-            let s1 = ldexp_v2(t1, t1_e - e_new);
-            let s2 = ldexp_v2(t2, t2_e - e_new);
-            sum = s1 + s2;
-        } else {
-            let t3 = dc_m;
-            let t3_e = dc_e;
-            e_new = max(t1_e, max(t2_e, t3_e));
-            let s1 = ldexp_v2(t1, t1_e - e_new);
-            let s2 = ldexp_v2(t2, t2_e - e_new);
-            let s3 = ldexp_v2(t3, t3_e - e_new);
-            sum = s1 + s2 + s3;
+            if ft == 2u {
+                let dn_real_pre = ldexp_v2(dn_m, dn_e);
+                let sr = signf(Zn_re_hi + dn_real_pre.x);
+                let si = signf(Zn_im_hi + dn_real_pre.y);
+                Zeff_re_hi = sr * Zn_re_hi;
+                Zeff_im_hi = si * Zn_im_hi;
+                Zeff_re_lo = sr * Zn_re_lo;
+                Zeff_im_lo = si * Zn_im_lo;
+                deff_m = vec2<f32>(sr * dn_m.x, si * dn_m.y);
+            } else if ft == 7u {
+                Zeff_im_hi = -Zn_im_hi;
+                Zeff_im_lo = -Zn_im_lo;
+                deff_m = vec2<f32>(dn_m.x, -dn_m.y);
+            }
+
+            // 2·Z_eff·δ_eff
+            let a = fma(Zeff_re_hi, deff_m.x, Zeff_re_lo * deff_m.x);
+            let b = fma(Zeff_im_hi, deff_m.y, Zeff_im_lo * deff_m.y);
+            let c = fma(Zeff_re_hi, deff_m.y, Zeff_re_lo * deff_m.y);
+            let d = fma(Zeff_im_hi, deff_m.x, Zeff_im_lo * deff_m.x);
+            let t1 = vec2<f32>(2.0 * (a - b), 2.0 * (c + d));
+            let t1_e = dn_e;
+
+            let t2 = vec2<f32>(
+                deff_m.x * deff_m.x - deff_m.y * deff_m.y,
+                2.0 * deff_m.x * deff_m.y,
+            );
+            let t2_e = 2 * dn_e;
+
+            var e_new: i32;
+            var sum: vec2<f32>;
+            if is_julia {
+                e_new = max(t1_e, t2_e);
+                let s1 = ldexp_v2(t1, t1_e - e_new);
+                let s2 = ldexp_v2(t2, t2_e - e_new);
+                sum = s1 + s2;
+            } else {
+                let t3 = dc_m;
+                let t3_e = dc_e;
+                e_new = max(t1_e, max(t2_e, t3_e));
+                let s1 = ldexp_v2(t1, t1_e - e_new);
+                let s2 = ldexp_v2(t2, t2_e - e_new);
+                let s3 = ldexp_v2(t3, t3_e - e_new);
+                sum = s1 + s2 + s3;
+            }
+
+            // Post-square modification
+            if ft == 8u {
+                let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
+                sum.x = sum.x * signf(Zsq_re);
+            } else if ft == 9u {
+                sum.y = sum.y * (-signf(Zn_re_hi));
+            } else if ft == 10u {
+                let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
+                let Zsq_im = 2.0 * Zn_re_hi * Zn_im_hi;
+                sum.x = sum.x * signf(Zsq_re);
+                sum.y = sum.y * (-signf(Zsq_im));
+            }
+
+            dn_m = sum;
+            dn_e = e_new;
+
+            // Renormalize
+            let mag = max(abs(dn_m.x), abs(dn_m.y));
+            if mag > 0.0 {
+                let shift_val = i32(floor(log2(mag)));
+                dn_m = ldexp_v2(dn_m, -shift_val);
+                dn_e = dn_e + shift_val;
+            }
+
+            ref_i = ref_i + 1u;
+            step = 1u;
         }
 
-        // ── Post-square modification ────────────────────────────────
-        // Adjust the result based on fractal type.
-        // These variants modify z² (not z) before adding c.
-        if ft == 8u {
-            // Celtic: |Re(z²)| → multiply Re by sign(Re(Z²))
-            let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
-            sum.x = sum.x * signf(Zsq_re);
-        } else if ft == 9u {
-            // Perpendicular: Im = -2|Re(z)|·Im(z) → multiply Im by -sign(Re(Z))
-            sum.y = sum.y * (-signf(Zn_re_hi));
-        } else if ft == 10u {
-            // Buffalo: |Re(z²)|, -|Im(z²)| → adjust both
-            let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
-            let Zsq_im = 2.0 * Zn_re_hi * Zn_im_hi;
-            sum.x = sum.x * signf(Zsq_re);
-            sum.y = sum.y * (-signf(Zsq_im));
-        }
-
-        dn_m = sum;
-        dn_e = e_new;
-
-        // Renormalize mantissa
-        let mag = max(abs(dn_m.x), abs(dn_m.y));
-        if mag > 0.0 {
-            let shift_val = i32(floor(log2(mag)));
-            dn_m = ldexp_v2(dn_m, -shift_val);
-            dn_e = dn_e + shift_val;
-        }
-
-        ref_i += 1u;
-
-        // Full orbit value: z_{n+1} = Z_{n+1} + delta_{n+1}
+        // ── Common: z_full computation, traps, escape, rebase ─────────
         let dn_real = ldexp_v2(dn_m, dn_e);
         var z_full: vec2<f32>;
         if ref_i < ref_len {
             let Zn1 = ref_orbit[ref_i];
             z_full = vec2<f32>(Zn1.x, Zn1.y) + dn_real;
         } else {
-            z_full = vec2<f32>(Zn_re_hi, Zn_im_hi) + dn_real;
+            // BLA stepped exactly to end; use last orbit point
+            let Zn_last = ref_orbit[ref_len - 1u];
+            z_full = vec2<f32>(Zn_last.x, Zn_last.y) + dn_real;
         }
 
-        // Orbit trap distances
-        trap_min.x = min(trap_min.x, length(z_full - trap0));
-        trap_min.y = min(trap_min.y, length(z_full - trap1));
-        trap_min.z = min(trap_min.z, length(z_full - trap2));
-        trap_min.w = min(trap_min.w, length(z_full - trap3));
+        // Orbit trap distances (only sampled on single-step iterations to avoid
+        // skipping minima inside a BLA chunk; BLA is for non-Canopy palettes anyway)
+        if step == 1u {
+            trap_min.x = min(trap_min.x, length(z_full - trap0));
+            trap_min.y = min(trap_min.y, length(z_full - trap1));
+            trap_min.z = min(trap_min.z, length(z_full - trap2));
+            trap_min.w = min(trap_min.w, length(z_full - trap3));
+        }
 
         // Escape check
         let mag2 = dot(z_full, z_full);
         if mag2 > 256.0 {
-            iter = i + 1u;
+            iter = i + step;
             break;
         }
 
-        // Rebasing: if |z_full| < |delta|, reset delta to z_full
+        // Rebase: when |z_full| < |delta|, glitch correction kicks in.
         let dn_mag2 = dot(dn_real, dn_real);
-        if dot(z_full, z_full) < dn_mag2 {
+        if mag2 < dn_mag2 {
             dn_m = z_full;
             dn_e = 0;
             ref_i = 0u;
+            let mag = max(abs(dn_m.x), abs(dn_m.y));
+            if mag > 0.0 {
+                let shift_val = i32(floor(log2(mag)));
+                dn_m = ldexp_v2(dn_m, -shift_val);
+                dn_e = dn_e + shift_val;
+            }
         }
+
+        i = i + step;
     }
 
     // Smooth iteration count

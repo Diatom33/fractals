@@ -317,7 +317,7 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
 }
 
 fn export_cli(args: &[String], path: &str) -> eframe::Result {
-    use fractals::{FractalParams, FractalType, GpuParams, PerturbGpuParams};
+    use fractals::{BlaCoeff, FractalParams, FractalType, GpuParams, PerturbGpuParams};
 
     let mut params = FractalParams::default();
 
@@ -528,6 +528,15 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let bla_num_levels_max = ((params.max_iter as f64 + 1.0).log2().ceil() as u32) + 2;
+    let bla_buf_size = (params.max_iter as u64 + 1) * bla_num_levels_max as u64
+        * std::mem::size_of::<BlaCoeff>() as u64;
+    let bla_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: bla_buf_size.max(64),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     // Decompose pixel_step into mantissa + exponent for extended-range perturbation
     let step_y = params.pixel_step_y(height);
@@ -537,20 +546,45 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let ps_mantissa_y = (step_y / ps_scale) as f32;
 
     if use_perturb {
-        let julia_c = if params.fractal_type == FractalType::Julia {
-            Some((params.julia_c[0] as f64, params.julia_c[1] as f64))
+        let is_mandelbrot = params.fractal_type == FractalType::Mandelbrot;
+        let (orbit_len, bla_num_levels) = if is_mandelbrot {
+            let delta_c_max = params.half_range_x.hypot(params.half_range_y).max(1e-300);
+            let eps = 1.0 / 1024.0;
+            let perturb_data = fractals::compute_mandelbrot_with_bla(
+                &params.center_re, &params.center_im,
+                params.max_iter, pixel_step,
+                delta_c_max, eps,
+            );
+            queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
+            if !perturb_data.bla.is_empty() {
+                queue.write_buffer(&bla_buf, 0, bytemuck::cast_slice(&perturb_data.bla));
+            }
+            (perturb_data.orbit_len, perturb_data.bla_num_levels)
         } else {
-            None
+            let julia_c = if params.fractal_type == FractalType::Julia {
+                Some((params.julia_c[0] as f64, params.julia_c[1] as f64))
+            } else {
+                None
+            };
+            let perturb_data = fractals::compute_variant_reference_orbit(
+                &params.center_re, &params.center_im,
+                params.max_iter, pixel_step,
+                params.fractal_type, julia_c,
+            );
+            queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
+            (perturb_data.orbit_len, 0u32)
         };
-        let perturb_data = fractals::compute_variant_reference_orbit(
-            &params.center_re, &params.center_im,
-            params.max_iter, pixel_step,
-            params.fractal_type, julia_c,
-        );
-        queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
-        let pgpu = PerturbGpuParams { ref_orbit_len: perturb_data.orbit_len, pixel_step_exp: ps_exp, _pad: [0; 2] };
+        let pgpu = PerturbGpuParams {
+            ref_orbit_len: orbit_len,
+            pixel_step_exp: ps_exp,
+            bla_num_levels,
+            _pad: 0,
+        };
         queue.write_buffer(&perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));
-        println!("  Perturbation mode: ref orbit {} iters, precision for 1e-{:.0}", perturb_data.orbit_len, -pixel_step.log10());
+        println!("  Perturbation mode: ref orbit {} iters{}, precision for 1e-{:.0}",
+            orbit_len,
+            if bla_num_levels > 0 { format!(", BLA {} levels", bla_num_levels) } else { String::new() },
+            -pixel_step.log10());
     }
 
     if params.fractal_type.needs_roots() {
@@ -611,7 +645,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     // Perturbation pipeline
     let perturb_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_uniform(4), bgl_storage(5, false)],
+        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_uniform(4), bgl_storage(5, false), bgl_storage(6, true)],
     });
     let perturb_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
@@ -626,7 +660,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     let perturb_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &perturb_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &ref_orbit_buf), be!(4, &perturb_params_buf), be!(5, &orbit_trap_buf)],
+        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &ref_orbit_buf), be!(4, &perturb_params_buf), be!(5, &orbit_trap_buf), be!(6, &bla_buf)],
     });
 
     // Newton pipeline
