@@ -205,6 +205,7 @@ pub enum ColorPalette {
     Canopy,           // 7: Canopy with bright bokeh highlights (tone-mapped)
     Bioluminescence,  // 8: Deep-sea abyssal bioluminescence with depth-aware glow
     Steve,            // 9: STEVE atmospheric ribbon — pastel mauve with green picket fence
+    InvertedPair,     // 10: High-contrast sinusoidal bands between complementary color pairs
 }
 
 impl ColorPalette {
@@ -219,6 +220,7 @@ impl ColorPalette {
         ColorPalette::Canopy,
         ColorPalette::Bioluminescence,
         ColorPalette::Steve,
+        ColorPalette::InvertedPair,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -233,6 +235,7 @@ impl ColorPalette {
             ColorPalette::Canopy => "Canopy",
             ColorPalette::Bioluminescence => "Bioluminescence",
             ColorPalette::Steve => "STEVE",
+            ColorPalette::InvertedPair => "Inverted Pair",
         }
     }
 
@@ -248,6 +251,7 @@ impl ColorPalette {
             ColorPalette::Canopy => 7,
             ColorPalette::Bioluminescence => 8,
             ColorPalette::Steve => 9,
+            ColorPalette::InvertedPair => 10,
         }
     }
 
@@ -259,6 +263,7 @@ impl ColorPalette {
             ColorPalette::Storm => 1.0,       // noise scale
             ColorPalette::Canopy => 3.0,      // trap scale
             ColorPalette::Bioluminescence => 5.0, // murkiness
+            ColorPalette::InvertedPair => 0.08, // band frequency
             _ => 0.0,
         }
     }
@@ -272,7 +277,7 @@ impl ColorPalette {
 
     /// Whether this palette uses the coloring_param slider.
     pub fn has_param(&self) -> bool {
-        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::Bioluminescence)
+        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::Bioluminescence | ColorPalette::InvertedPair)
     }
 
     /// Label for the coloring_param slider.
@@ -283,6 +288,7 @@ impl ColorPalette {
             ColorPalette::Storm => "Noise scale",
             ColorPalette::Canopy => "Trap scale",
             ColorPalette::Bioluminescence => "Murkiness",
+            ColorPalette::InvertedPair => "Band frequency",
             _ => "",
         }
     }

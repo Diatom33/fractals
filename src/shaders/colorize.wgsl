@@ -449,6 +449,39 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
     return clamp(water + ambient + (direct + scattered) * atten, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// Palette 10: Inverted Pair — high-contrast sinusoidal bands between complementary colors.
+// Fast axis: sinusoidal oscillation between dark A and bright B.
+// Slow axis: (A, B) drifts through complementary hue pairs (180° apart in Oklab a/b plane).
+// At H_slow=0, chroma ≈ 0 → pure black/white; grows as hue rotates for subtly tinted pairs.
+fn palette_inverted_pair(smooth_iter: f32) -> vec3<f32> {
+    let pi = 3.14159265;
+    let fast_freq = params.coloring_param;
+    let slow_freq = 0.01;
+
+    let h_slow = fract(smooth_iter * slow_freq);
+    // Chroma grows from 0 (pure B&W) as hue rotates; sin(π·h) peaks mid-cycle, returns to 0.
+    let chroma = 0.15 * sin(pi * h_slow);
+
+    let hue_angle = 2.0 * pi * h_slow;
+    let l_low = 0.10;
+    let l_high = 0.92;
+
+    // A = dark with hue H_slow; B = bright with complementary hue (H_slow + 0.5).
+    let a_a = chroma * cos(hue_angle);
+    let a_b = chroma * sin(hue_angle);
+    let b_a = -a_a;
+    let b_b = -a_b;
+
+    let t = 0.5 + 0.5 * sin(smooth_iter * 2.0 * pi * fast_freq);
+
+    let L = mix(l_low, l_high, t);
+    let ok_a = mix(a_a, b_a, t);
+    let ok_b = mix(a_b, b_b, t);
+
+    let linear = oklab_to_linear_srgb(L, ok_a, ok_b);
+    return linear_to_srgb(linear);
+}
+
 // Dispatch to selected palette (returns sRGB)
 fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
     switch params.palette {
@@ -460,6 +493,7 @@ fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, dz_mag: f32, dz_a
         case 6u: { return palette_storm(smooth_iter, idx); }
         case 7u: { return palette_canopy(smooth_iter, idx); }
         case 8u: { return palette_biolum(smooth_iter, idx); }
+        case 10u: { return palette_inverted_pair(smooth_iter); }
         default: { return palette_classic(smooth_iter); }
     }
 }
