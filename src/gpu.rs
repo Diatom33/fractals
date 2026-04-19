@@ -72,8 +72,8 @@ pub struct GpuState {
     // Perturbation state
     pub using_perturbation: bool,
     ref_orbit_max_entries: u32, // current capacity of ref_orbit_buffer
-    // Cache key: (center_re, center_im, max_iter, orbit_len, fractal_type, julia_c, half_range_x, bla_num_levels)
-    cached_ref_orbit: Option<(Float, Float, u32, u32, u32, [f32; 2], f64, u32)>,
+    // Cache key: (center_re, center_im, max_iter, orbit_len, fractal_type, julia_c, half_range_x, half_range_y, bla_num_levels)
+    cached_ref_orbit: Option<(Float, Float, u32, u32, u32, [f32; 2], f64, f64, u32)>,
 
     // Staging buffer for batched sample params (avoids per-sample GPU sync)
     params_staging_buffer: wgpu::Buffer,
@@ -762,13 +762,14 @@ impl GpuState {
             let is_mandelbrot = params.fractal_type == crate::fractals::FractalType::Mandelbrot;
             let need_recompute = match &self.cached_ref_orbit {
                 None => true,
-                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc, prev_hr, _prev_bla)) => {
+                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc, prev_hrx, prev_hry, _prev_bla)) => {
                     *prev_re != params.center_re
                         || *prev_im != params.center_im
                         || *prev_iter < params.max_iter
                         || *prev_ft != ft_idx
                         || *prev_jc != params.julia_c
-                        || *prev_hr != params.half_range_x
+                        || *prev_hrx != params.half_range_x
+                        || *prev_hry != params.half_range_y
                 }
             };
 
@@ -827,12 +828,12 @@ impl GpuState {
                 self.cached_ref_orbit = Some((
                     params.center_re.clone(), params.center_im.clone(),
                     params.max_iter, orbit_len, ft_idx, params.julia_c,
-                    params.half_range_x, bla_num_levels,
+                    params.half_range_x, params.half_range_y, bla_num_levels,
                 ));
             } else {
                 let cached = self.cached_ref_orbit.as_ref().unwrap();
                 let orbit_len = cached.3;
-                let bla_num_levels = cached.7;
+                let bla_num_levels = cached.8;
                 let perturb_gpu = PerturbGpuParams {
                     ref_orbit_len: orbit_len,
                     pixel_step_exp: ps_exp,
