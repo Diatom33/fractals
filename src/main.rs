@@ -379,6 +379,7 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
                 "storm" => fractals::ColorPalette::Storm,
                 "canopy" | "primordial" => fractals::ColorPalette::Canopy,
                 "bioluminescence" | "biolum" | "abyss" => fractals::ColorPalette::Bioluminescence,
+                "steve" => fractals::ColorPalette::Steve,
                 "invertedpair" | "inverted" | "inverted-pair" | "ip" => fractals::ColorPalette::InvertedPair,
                 _ => fractals::ColorPalette::Classic,
             };

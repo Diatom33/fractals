@@ -264,6 +264,7 @@ impl ColorPalette {
             ColorPalette::Canopy => 3.0,      // trap scale
             ColorPalette::Bioluminescence => 5.0, // murkiness
             ColorPalette::InvertedPair => 0.08, // band frequency
+            ColorPalette::Steve => 18.0,       // picket-fence post density
             _ => 0.0,
         }
     }
@@ -277,7 +278,7 @@ impl ColorPalette {
 
     /// Whether this palette uses the coloring_param slider.
     pub fn has_param(&self) -> bool {
-        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::Bioluminescence | ColorPalette::InvertedPair)
+        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::Bioluminescence | ColorPalette::InvertedPair | ColorPalette::Steve)
     }
 
     /// Label for the coloring_param slider.
@@ -289,6 +290,7 @@ impl ColorPalette {
             ColorPalette::Canopy => "Trap scale",
             ColorPalette::Bioluminescence => "Murkiness",
             ColorPalette::InvertedPair => "Band frequency",
+            ColorPalette::Steve => "Post density",
             _ => "",
         }
     }

@@ -360,6 +360,30 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
     return clamp(water + ambient + (direct + scattered) * atten, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// Palette 9: STEVE — pastel lilac/mauve ribbon with green picket-fence posts.
+fn palette_steve(smooth_iter: f32) -> vec3<f32> {
+    let two_pi = 6.2831853;
+    let k = params.coloring_param;
+    let log_iter = log2(smooth_iter + 1.0);
+    let t = fract(log_iter * 0.08);
+
+    let a = vec3<f32>(0.55, 0.38, 0.62);
+    let b = vec3<f32>(0.35, 0.22, 0.35);
+    let c = vec3<f32>(0.90, 0.95, 1.00);
+    let d = vec3<f32>(0.00, 0.12, 0.28);
+    let base = a + b * cos(two_pi * (c * t + d));
+
+    let raw = abs(sin(k * t));
+    let fence = smoothstep(0.92, 0.99, raw);
+    let ribbon_mask = smoothstep(0.35, 0.50, t) * (1.0 - smoothstep(0.80, 0.95, t));
+
+    let green_body = vec3<f32>(0.235, 0.910, 0.533);
+    let green_tip  = vec3<f32>(0.612, 1.000, 0.722);
+    let fence_col  = mix(green_body, green_tip, raw);
+
+    return mix(base, fence_col, fence * ribbon_mask);
+}
+
 // Palette 10: Inverted Pair — high-contrast sinusoidal bands between complementary colors.
 fn palette_inverted_pair(smooth_iter: f32) -> vec3<f32> {
     let pi = 3.14159265;
@@ -397,6 +421,7 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: 
         case 6u: { return palette_storm(smooth_iter, px, py); }
         case 7u: { return palette_canopy(smooth_iter, py * params.stride + px); }
         case 8u: { return palette_biolum(smooth_iter, px, py); }
+        case 9u: { return palette_steve(smooth_iter); }
         case 10u: { return palette_inverted_pair(smooth_iter); }
         default: { return palette_classic(smooth_iter); }
     }

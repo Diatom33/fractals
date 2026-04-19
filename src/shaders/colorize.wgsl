@@ -449,6 +449,39 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
     return clamp(water + ambient + (direct + scattered) * atten, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// Palette 9: STEVE — pastel lilac/mauve ribbon (IQ cosine) with green picket-fence
+// posts alongside the mauve band. Models the Strong Thermal Emission Velocity
+// Enhancement sky feature: desaturated mauve aurora strip with short vertical green
+// columns running parallel to it.
+fn palette_steve(smooth_iter: f32) -> vec3<f32> {
+    let two_pi = 6.2831853;
+    let k = params.coloring_param; // post density
+    let log_iter = log2(smooth_iter + 1.0);
+    let t = fract(log_iter * 0.08);
+
+    // Base ribbon: IQ cosine palette calibrated for the mauve target stops.
+    let a = vec3<f32>(0.55, 0.38, 0.62);
+    let b = vec3<f32>(0.35, 0.22, 0.35);
+    let c = vec3<f32>(0.90, 0.95, 1.00);
+    let d = vec3<f32>(0.00, 0.12, 0.28);
+    let base = a + b * cos(two_pi * (c * t + d));
+
+    // Picket fence: thresholded |sin| gives sharp thin columns, not soft stripes.
+    let raw = abs(sin(k * t));
+    let fence = smoothstep(0.92, 0.99, raw);
+
+    // Ribbon mask: confines fence to the mauve mid-band so the outer calm and
+    // near-black don't get invaded by pickets.
+    let ribbon_mask = smoothstep(0.35, 0.50, t) * (1.0 - smoothstep(0.80, 0.95, t));
+
+    // Fence color (green body, with a soft pink tip via raw interpolation).
+    let green_body = vec3<f32>(0.235, 0.910, 0.533);  // #3CE888
+    let green_tip  = vec3<f32>(0.612, 1.000, 0.722);  // #9CFFB8
+    let fence_col  = mix(green_body, green_tip, raw);
+
+    return mix(base, fence_col, fence * ribbon_mask);
+}
+
 // Palette 10: Inverted Pair — high-contrast sinusoidal bands between complementary colors.
 // Fast axis: sinusoidal oscillation between dark A and bright B.
 // Slow axis: (A, B) drifts through complementary hue pairs (180° apart in Oklab a/b plane).
@@ -493,6 +526,7 @@ fn escape_color(smooth_iter: f32, max_iter: f32, z: vec2<f32>, dz_mag: f32, dz_a
         case 6u: { return palette_storm(smooth_iter, idx); }
         case 7u: { return palette_canopy(smooth_iter, idx); }
         case 8u: { return palette_biolum(smooth_iter, idx); }
+        case 9u: { return palette_steve(smooth_iter); }
         case 10u: { return palette_inverted_pair(smooth_iter); }
         default: { return palette_classic(smooth_iter); }
     }
