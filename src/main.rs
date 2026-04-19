@@ -318,6 +318,7 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
 
 fn export_cli(args: &[String], path: &str) -> eframe::Result {
     use fractals::{BlaCoeff, FractalParams, FractalType, GpuParams, PerturbGpuParams};
+    use rug::ops::CompleteRound;
 
     let mut params = FractalParams::default();
 
@@ -408,6 +409,30 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
             if parts.len() == 4 {
                 params.set_from_bounds([parts[0], parts[1], parts[2], parts[3]]);
             }
+        }
+    }
+
+    // Parse --center-re STR --center-im STR --zoom EXPR for arbitrary-precision deep zoom.
+    // Uses rug::Float string parsing so we can hit 1e-100+ depths from CLI.
+    let center_re_str = args.iter().position(|a| a == "--center-re").and_then(|p| args.get(p + 1));
+    let center_im_str = args.iter().position(|a| a == "--center-im").and_then(|p| args.get(p + 1));
+    let zoom_str = args.iter().position(|a| a == "--zoom").and_then(|p| args.get(p + 1));
+    if let (Some(cre), Some(cim), Some(z)) = (center_re_str, center_im_str, zoom_str) {
+        let zoom_extent: f64 = z.parse().unwrap_or(0.0);
+        if zoom_extent > 0.0 {
+            // Precision needs to comfortably exceed the requested depth.
+            let prec_bits = (((-zoom_extent.log10()).max(16.0) * 4.0) as u32 + 64).max(128);
+            let cre_f = rug::Float::parse(cre.as_str()).expect("invalid --center-re").complete(prec_bits);
+            let cim_f = rug::Float::parse(cim.as_str()).expect("invalid --center-im").complete(prec_bits);
+            params.center_re = cre_f;
+            params.center_im = cim_f;
+            // Aspect-correct: half_range_x = zoom/2 in x, half_range_y matches view aspect
+            let aspect = (args.iter().position(|a| a == "--width").and_then(|p| args.get(p + 1))
+                .and_then(|v| v.parse::<u32>().ok()).unwrap_or(1920)) as f64
+                / (args.iter().position(|a| a == "--height").and_then(|p| args.get(p + 1))
+                .and_then(|v| v.parse::<u32>().ok()).unwrap_or(1080)) as f64;
+            params.half_range_x = zoom_extent * 0.5;
+            params.half_range_y = zoom_extent * 0.5 / aspect;
         }
     }
 
