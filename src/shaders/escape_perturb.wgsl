@@ -157,11 +157,13 @@ fn dsc_ldexp(a: vec4<f32>, e: i32) -> vec4<f32> {
 
 // Returns the shift that dsc_renorm would apply (so caller can update exp).
 // Guarded against denormal mag (log2 returns -inf there on FTZ hardware,
-// then floor(-inf) → i32::MIN and -shift overflows to garbage). Below
-// ~1e-30 we accept slight loss rather than risk an exponent blowup.
+// then floor(-inf) → i32::MIN and -shift overflows to garbage). The lower
+// bound (~1e-30) avoids that path; the upper bound (~1e36, near f32 max
+// finite ~3.4e38) avoids overflow in the log2/floor chain. BLA can produce
+// pre-renormalize mantissas in the 1e30–1e35 range so we leave headroom.
 fn dsc_renorm_shift(a: vec4<f32>) -> i32 {
     let mag = max(abs(a.x), abs(a.z));
-    if mag > 1.0e-30 && mag < 1.0e30 {
+    if mag > 1.0e-30 && mag < 1.0e36 {
         return -i32(floor(log2(mag)));
     }
     return 0;
@@ -405,18 +407,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             break;
         }
 
-        // Rebase (Pauldelbrot-style glitch correction): trigger when |z_full|² is
-        // much smaller than the reference orbit's |Z|². This catches cases where the
-        // pixel's true orbit has wandered to a different attractor than the reference,
-        // which produces salt-and-pepper noise in nominally-interior regions.
-        // Using the reference Z's magnitude (not δ's) avoids the underflow problem
-        // where ldexp(dn, dn_e) flushes to zero at deep zoom and dn_mag2 becomes 0.
-        let z_ref_re = select(ref_orbit[ref_i - 1u].x, ref_orbit[ref_i].x, ref_i < ref_len);
-        let z_ref_im = select(ref_orbit[ref_i - 1u].y, ref_orbit[ref_i].y, ref_i < ref_len);
-        let z_ref_mag2 = z_ref_re * z_ref_re + z_ref_im * z_ref_im;
-        // Glitch threshold: |z_full|² < ε² × |Z|² means perturbation has tunneled.
-        // ε = 1e-3 → ε² = 1e-6 (Zhuoran's recommended default).
-        if mag2 < 1.0e-6 * z_ref_mag2 {
+        // Rebase (glitch correction). Two checks combined:
+        //   (a) Original |z_full|² < |δ|²: works at shallow depth where δ_real is
+        //       a meaningful single-f32 value.
+        //   (b) Pauldelbrot |z_full|² < ε² × |Z_ref|²: needed at deep depth where
+        //       ldexp(dn, dn_e) underflows so |δ|² is 0 and (a) never fires.
+        // Using (b) at shallow depth over-triggers (true |δ| is comparable to |Z|
+        // for outside-the-set pixels, which makes |z_full| naturally < ε|Z_ref|),
+        // smearing detail. So only use (b) when (a) is unable to fire.
+        let dn_mag2 = dot(dn_real, dn_real);
+        var should_rebase = mag2 < dn_mag2;
+        if dn_mag2 == 0.0 {
+            // Bounds-clamped reference index (both `select` arms evaluate in WGSL)
+            let ri_safe = min(max(ref_i, 1u), ref_len) - 1u;
+            let z_ref_re = ref_orbit[ri_safe].x;
+            let z_ref_im = ref_orbit[ri_safe].y;
+            let z_ref_mag2 = z_ref_re * z_ref_re + z_ref_im * z_ref_im;
+            // ε = 1e-3 → ε² = 1e-6 (Zhuoran's default)
+            should_rebase = mag2 < 1.0e-6 * z_ref_mag2;
+        }
+        if should_rebase {
             dn = vec4<f32>(z_full.x, 0.0, z_full.y, 0.0);
             dn_e = 0;
             ref_i = 0u;
