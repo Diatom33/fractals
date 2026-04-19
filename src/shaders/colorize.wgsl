@@ -456,7 +456,7 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
 fn palette_inverted_pair(smooth_iter: f32) -> vec3<f32> {
     let pi = 3.14159265;
     let fast_freq = params.coloring_param;
-    let slow_freq = 0.01;
+    let slow_freq = 0.0025;
 
     let h_slow = fract(smooth_iter * slow_freq);
     // Chroma grows from 0 (pure B&W) as hue rotates; sin(π·h) peaks mid-cycle, returns to 0.

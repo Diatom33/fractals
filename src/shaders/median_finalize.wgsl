@@ -364,7 +364,7 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
 fn palette_inverted_pair(smooth_iter: f32) -> vec3<f32> {
     let pi = 3.14159265;
     let fast_freq = params.coloring_param;
-    let slow_freq = 0.01;
+    let slow_freq = 0.0025;
 
     let h_slow = fract(smooth_iter * slow_freq);
     let chroma = 0.15 * sin(pi * h_slow);
