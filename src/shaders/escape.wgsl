@@ -208,8 +208,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dz_i: f32 = 0.0;
     let dz_offset = select(1.0, 0.0, is_julia);
 
-    // Multibrot power (only used when fractal_type == 3)
-    let multibrot_d = u32(params.power);
+    // Multibrot power (only used when fractal_type == 3).
+    // Snap to integer when very close so integer powers use exact ds_cpow_int;
+    // fractional powers fall through to polar-form cpow (f32 precision only).
+    let power_nearest = round(params.power);
+    let is_integer_power = abs(params.power - power_nearest) < 1e-4;
+    let multibrot_d = u32(power_nearest);
 
     for (var i: u32 = 0u; i < max_i; i++) {
 
@@ -224,11 +228,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             dz_i = new_di;
         }
 
-        // ── Multibrot (type 3): z = z^d + c using ds_cpow_int ───────────
+        // ── Multibrot (type 3): z = z^d + c ─────────────────────────────
+        // Integer d uses double-single repeated squaring; fractional d uses
+        // polar-form cpow (f32 precision — deep zoom on non-integer d is
+        // inherently limited until a perturbation path is added).
         if params.fractal_type == 3u {
-            let zd = ds_cpow_int(zr, zi, multibrot_d);
-            zr = ds_add(zd[0], cr);
-            zi = ds_add(zd[1], ci);
+            if is_integer_power {
+                let zd = ds_cpow_int(zr, zi, multibrot_d);
+                zr = ds_add(zd[0], cr);
+                zi = ds_add(zd[1], ci);
+            } else {
+                let z_f32 = vec2<f32>(zr.x + zr.y, zi.x + zi.y);
+                let zd = cpow(z_f32, params.power);
+                zr = ds_add(vec2<f32>(zd.x, 0.0), cr);
+                zi = ds_add(vec2<f32>(zd.y, 0.0), ci);
+            }
         } else {
             // ── z² variants: Mandelbrot, Julia, Burning Ship, etc. ──────
 

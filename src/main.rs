@@ -346,6 +346,15 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         }
     }
 
+    // Parse --power (for Multibrot; supports fractional values like 2.5, 3.7)
+    if let Some(pos) = args.iter().position(|a| a == "--power") {
+        if let Some(val) = args.get(pos + 1) {
+            if let Ok(p) = val.parse::<f32>() {
+                params.power = p;
+            }
+        }
+    }
+
     // Parse --supersample (1, 2, or 3)
     if let Some(pos) = args.iter().position(|a| a == "--supersample" || a == "--ss") {
         if let Some(val) = args.get(pos + 1) {
