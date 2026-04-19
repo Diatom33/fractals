@@ -198,6 +198,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let is_julia = ft == 1u;
 
     // Initial delta: Mandelbrot variants δ₀ = 0; Julia δ₀ = pixel offset.
+    // For Mandelbrot, set dn_e = dc_e even though mantissa is zero — at iter 0,
+    // t1_e and t2_e derive from dn_e, so a "dn_e = 0" choice would force
+    // e_new = max(0, 0, dc_e) = 0 and shift dc by dc_e (~-130 at deep zoom) into
+    // the f32 denormal range, where some GPUs flush to zero. That kills the dc
+    // contribution and δ stays 0 forever → pixel follows reference orbit →
+    // sharp black "interior" rectangles. Anchoring dn_e to dc_e keeps everything
+    // in normal range.
     var dn: vec4<f32>;
     var dn_e: i32;
     if is_julia {
@@ -205,7 +212,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         dn_e = dc_e;
     } else {
         dn = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-        dn_e = 0;
+        dn_e = dc_e;
     }
     // Orbit trap points for Canopy palette
     let trap0 = vec2<f32>(0.0, 0.0);
