@@ -495,7 +495,7 @@ impl eframe::App for FractalApp {
                                 .weak(),
                         );
 
-                        // Show current view bounds
+                        // Show current view bounds (truncated for compactness)
                         let [x_min, x_max, y_min, y_max] = self.params.bounds_f64();
                         ui.add_space(2.0);
                         ui.label(
@@ -516,6 +516,51 @@ impl eframe::App for FractalApp {
                                     .monospace(),
                             );
                         }
+
+                        // Precise center + zoom for sharing / CLI use.
+                        // Number of decimals shown scales with zoom depth so the
+                        // string preserves enough precision to round-trip the view.
+                        let zoom = 2.0 * self.params.half_range_x;
+                        let zoom_log10 = if zoom > 0.0 {
+                            (-zoom.log10()).max(0.0)
+                        } else { 0.0 };
+                        let precision_digits = (zoom_log10 as usize + 8).max(20);
+                        let center_re_str = self.params.center_re
+                            .to_string_radix(10, Some(precision_digits));
+                        let center_im_str = self.params.center_im
+                            .to_string_radix(10, Some(precision_digits));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Precise coordinates").small().weak());
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("re:").small().weak().monospace());
+                            ui.add(egui::TextEdit::singleline(&mut center_re_str.clone())
+                                .desired_width(ui.available_width() - 50.0)
+                                .font(egui::TextStyle::Monospace));
+                            if ui.small_button("Copy").clicked() {
+                                ui.ctx().copy_text(center_re_str.clone());
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("im:").small().weak().monospace());
+                            ui.add(egui::TextEdit::singleline(&mut center_im_str.clone())
+                                .desired_width(ui.available_width() - 50.0)
+                                .font(egui::TextStyle::Monospace));
+                            if ui.small_button("Copy").clicked() {
+                                ui.ctx().copy_text(center_im_str.clone());
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let zoom_str = format!("{:.6e}", zoom);
+                            ui.label(egui::RichText::new("zoom:").small().weak().monospace());
+                            ui.label(egui::RichText::new(&zoom_str).small().monospace());
+                            if ui.small_button("Copy CLI args").clicked() {
+                                let cli = format!(
+                                    "--center-re \"{}\" --center-im \"{}\" --zoom {}",
+                                    center_re_str, center_im_str, zoom_str
+                                );
+                                ui.ctx().copy_text(cli);
+                            }
+                        });
 
                         // ── Export ─────────────────────────────────────
                         section_header(ui, "Export");
