@@ -454,7 +454,11 @@ fn palette_biolum(smooth_iter: f32, idx: u32) -> vec3<f32> {
 // field, with each green picket oriented parallel to the local escape direction
 // (like thin-film's dz_angle bands).
 fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
-    let k = params.coloring_param;                  // post density
+    // "Activity" = atmospheric intensity (analogous to Biolum's murkiness).
+    // Scales ribbon width, halo spread, and fence brightness together so the
+    // aurora can go from faint post-glimmer to bright charged-sky vibe.
+    let activity = params.coloring_param;
+    let k = 18.0;                                    // post density (fixed)
     let stride_val = params.stride;
     let w = params.resolution.x;
     let h = params.resolution.y;
@@ -475,53 +479,73 @@ fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, idx
     }
     let grad_mag = sqrt(gx * gx + gy * gy);
 
-    // ── STEVE ribbon (mauve): peaks where the boundary is. Desaturated lilac
-    //    per spec; slight hue drift along the boundary by iter count so it
-    //    doesn't read as a flat stencil.
-    let ribbon = smoothstep(0.6, 4.0, grad_mag);
+    // ── STEVE ribbon: mauve band on the boundary, with "species"-style hue
+    //    drift by iter depth (like Biolum does). The ribbon shifts between
+    //    deep-plum → steve-mauve → cool blue-violet → warm pink-mauve as the
+    //    boundary winds through regions of different local period. A second
+    //    slower cycle adds a lightness pulse so peaks glow more hot-white.
+    // Ribbon width scales with activity: calm aurora → thin boundary line,
+    // charged aurora → wide glowing band.
+    let ribbon = smoothstep(0.6 / activity, 4.0 / activity, grad_mag);
     let log_iter = log2(smooth_iter + 1.0);
-    let mauve_deep   = vec3<f32>(0.290, 0.122, 0.322); // #4A1F52 shoulder
+    let phase_hue = log_iter * 0.35;
+    let phase_lum = log_iter * 0.17;
+    let mauve_plum   = vec3<f32>(0.290, 0.122, 0.322); // #4A1F52
     let mauve_steve  = vec3<f32>(0.706, 0.541, 0.831); // #B48AD4
-    let mauve_light  = vec3<f32>(0.831, 0.659, 0.910); // #D4A8E8
+    let mauve_cool   = vec3<f32>(0.537, 0.561, 0.878); // cool violet-blue
+    let mauve_warm   = vec3<f32>(0.895, 0.663, 0.828); // warm pink-mauve
     let mauve_white  = vec3<f32>(0.957, 0.863, 0.973); // #F4DCF8
-    let hue_drift = 0.5 + 0.5 * sin(log_iter * 0.25);
-    let ribbon_inner = mix(mauve_steve, mauve_light, hue_drift);
-    // Pull hotter toward white on the peak of the ribbon (highest grad).
-    let ribbon_col = mix(mauve_deep, mix(ribbon_inner, mauve_white, 0.3 * ribbon), ribbon);
+    // 3-way hue drift: cool ↔ steve-mauve ↔ warm, driven by sin & cos.
+    let w_cool = max(cos(phase_hue), 0.0);
+    let w_warm = max(cos(phase_hue + 3.14159265), 0.0);
+    let w_mid  = max(sin(phase_hue) * sin(phase_hue), 0.15);
+    let w_sum  = w_cool + w_warm + w_mid;
+    let ribbon_mid = (mauve_cool * w_cool + mauve_warm * w_warm + mauve_steve * w_mid) / w_sum;
+    // Luminance pulse: occasionally flare toward #F4DCF8 (near-white mauve).
+    let lum_pulse = 0.5 + 0.5 * cos(phase_lum);
+    let ribbon_inner = mix(ribbon_mid, mauve_white, 0.28 * lum_pulse);
+    // Deep plum at the outer edge of the ribbon (low grad), bright mauve at core.
+    let ribbon_col = mix(mauve_plum, ribbon_inner, ribbon);
 
     // ── Picket fence (exterior): posts parallel to the escape direction.
-    //    dz_angle is arg(dz/dc), the direction the orbit "escapes" through —
-    //    the tangent to level curves of iter count. Pickets oriented along
-    //    this direction means their PHASE varies perpendicular to escape,
-    //    producing thin angular fence posts radiating from the set.
+    //    dz_angle is arg(dz/dc), the direction the orbit escapes through.
+    //    Each post's phase combines angle + log_iter so posts have finite
+    //    vertical extent (in iter axis) instead of one long radial ridge.
     var escape_angle: f32;
     if dz_mag > 0.0 {
         escape_angle = dz_angle;
     } else {
-        // Perturbation / no-derivative fallback: use arg(z) at bailout.
         escape_angle = atan2(z.y, z.x);
     }
-    // Combine angle AND log-iter so posts have vertical (iter) extent and angular
-    // (escape-direction) periodicity. Without the log-iter term, all posts at
-    // the same angle merge into one long radial line; including it breaks them
-    // into discrete pickets along the escape gradient.
-    let log_iter_fence = log2(smooth_iter + 1.0);
-    let phase = k * 0.5 * escape_angle + log_iter_fence * 3.0;
-    let raw = abs(sin(phase));
-    let fence = smoothstep(0.80, 0.97, raw);  // wider activation → visible posts
+    let phase = k * 0.5 * escape_angle + log_iter * 2.8;
+    // Sharpened peak: pow of shifted cosine gives narrow bright posts with
+    // proper dark sky between them (not pink/green alternating taffy).
+    let peak = 0.5 + 0.5 * cos(phase);
+    let core = pow(peak, 18.0);          // very narrow bright core
+    // Halo spread widens with activity (soft glow around each post).
+    let halo_exp = max(1.5, 6.0 / activity);
+    let halo = pow(peak, halo_exp) * 0.35 * activity;
+    let fence_intensity = core + halo;
 
-    // Green body (#3CE888 → #9CFFB8 by raw), pink tip (#F0A8C8) on peaks.
-    let green_dark  = vec3<f32>(0.235, 0.910, 0.533);
-    let green_light = vec3<f32>(0.612, 1.000, 0.722);
-    let pink_tip    = vec3<f32>(0.941, 0.659, 0.784);
-    let green_body  = mix(green_dark, green_light, raw);
-    let green_col   = mix(green_body, pink_tip, smoothstep(0.97, 1.00, raw));
-
-    // Background: near-black violet #060212. Fence only shows in exterior
-    // (ribbon weak); ribbon dominates on the boundary.
-    let background = vec3<f32>(0.024, 0.008, 0.071);
-    let fence_weight = fence * (1.0 - ribbon);
-    let exterior = mix(background, green_col, fence_weight);
+    // Post color: body shifts along the post's height (driven by log_iter)
+    // from teal-green low → bright green mid → pink flush at tip. This is
+    // what gives pickets a proper vertical gradient instead of flat bands.
+    let tip_phase = fract(log_iter * 0.22);
+    let green_teal  = vec3<f32>(0.110, 0.780, 0.620);   // deep teal-green
+    let green_body  = vec3<f32>(0.235, 0.910, 0.533);   // #3CE888
+    let green_light = vec3<f32>(0.612, 1.000, 0.722);   // #9CFFB8
+    let pink_flush  = vec3<f32>(0.941, 0.659, 0.784);   // #F0A8C8
+    var post_col: vec3<f32>;
+    if tip_phase < 0.45 {
+        post_col = mix(green_teal, green_body, smoothstep(0.0, 0.45, tip_phase));
+    } else if tip_phase < 0.80 {
+        post_col = mix(green_body, green_light, smoothstep(0.45, 0.80, tip_phase));
+    } else {
+        post_col = mix(green_light, pink_flush, smoothstep(0.80, 1.00, tip_phase));
+    }
+    // Dark sky between posts (near-black violet).
+    let sky = vec3<f32>(0.024, 0.008, 0.071);
+    let exterior = sky + post_col * fence_intensity * (1.0 - ribbon);
     return mix(exterior, ribbon_col, ribbon);
 }
 

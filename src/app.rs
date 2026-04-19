@@ -361,6 +361,7 @@ impl eframe::App for FractalApp {
                                 crate::fractals::ColorPalette::Aurora => 0.5..=10.0,
                                 crate::fractals::ColorPalette::Storm => 0.2..=5.0,
                                 crate::fractals::ColorPalette::Bioluminescence => 0.5..=20.0,
+                                crate::fractals::ColorPalette::Steve => 0.2..=3.0,
                                 crate::fractals::ColorPalette::InvertedPair => 0.02..=0.30,
                                 _ => 0.0..=1.0,
                             };

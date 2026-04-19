@@ -264,7 +264,7 @@ impl ColorPalette {
             ColorPalette::Canopy => 3.0,      // trap scale
             ColorPalette::Bioluminescence => 5.0, // murkiness
             ColorPalette::InvertedPair => 0.08, // band frequency
-            ColorPalette::Steve => 18.0,       // picket-fence post density
+            ColorPalette::Steve => 1.0,        // aurora activity (1.0 = nominal)
             _ => 0.0,
         }
     }
@@ -290,7 +290,7 @@ impl ColorPalette {
             ColorPalette::Canopy => "Trap scale",
             ColorPalette::Bioluminescence => "Murkiness",
             ColorPalette::InvertedPair => "Band frequency",
-            ColorPalette::Steve => "Post density",
+            ColorPalette::Steve => "Activity",
             _ => "",
         }
     }

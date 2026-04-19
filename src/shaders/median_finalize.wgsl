@@ -364,7 +364,9 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
 // like Bioluminescence); exterior = green picket fence with posts oriented
 // parallel to the escape direction (via dz_angle like thin-film).
 fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: u32, py: u32) -> vec3<f32> {
-    let k = params.coloring_param;
+    // "Activity": atmospheric intensity, analogous to Biolum's murkiness.
+    let activity = params.coloring_param;
+    let k = 18.0;                                    // post density (fixed)
     let stride_val = params.stride;
     let w = params.resolution.x;
     let h = params.resolution.y;
@@ -381,15 +383,23 @@ fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px:
     }
     let grad_mag = sqrt(gx * gx + gy * gy);
 
-    let ribbon = smoothstep(0.6, 4.0, grad_mag);
+    let ribbon = smoothstep(0.6 / activity, 4.0 / activity, grad_mag);
     let log_iter = log2(smooth_iter + 1.0);
-    let mauve_deep   = vec3<f32>(0.290, 0.122, 0.322); // #4A1F52
-    let mauve_steve  = vec3<f32>(0.706, 0.541, 0.831); // #B48AD4
-    let mauve_light  = vec3<f32>(0.831, 0.659, 0.910); // #D4A8E8
-    let mauve_white  = vec3<f32>(0.957, 0.863, 0.973); // #F4DCF8
-    let hue_drift = 0.5 + 0.5 * sin(log_iter * 0.25);
-    let ribbon_inner = mix(mauve_steve, mauve_light, hue_drift);
-    let ribbon_col = mix(mauve_deep, mix(ribbon_inner, mauve_white, 0.3 * ribbon), ribbon);
+    let phase_hue = log_iter * 0.35;
+    let phase_lum = log_iter * 0.17;
+    let mauve_plum   = vec3<f32>(0.290, 0.122, 0.322);
+    let mauve_steve  = vec3<f32>(0.706, 0.541, 0.831);
+    let mauve_cool   = vec3<f32>(0.537, 0.561, 0.878);
+    let mauve_warm   = vec3<f32>(0.895, 0.663, 0.828);
+    let mauve_white  = vec3<f32>(0.957, 0.863, 0.973);
+    let w_cool = max(cos(phase_hue), 0.0);
+    let w_warm = max(cos(phase_hue + 3.14159265), 0.0);
+    let w_mid  = max(sin(phase_hue) * sin(phase_hue), 0.15);
+    let w_sum  = w_cool + w_warm + w_mid;
+    let ribbon_mid = (mauve_cool * w_cool + mauve_warm * w_warm + mauve_steve * w_mid) / w_sum;
+    let lum_pulse = 0.5 + 0.5 * cos(phase_lum);
+    let ribbon_inner = mix(ribbon_mid, mauve_white, 0.28 * lum_pulse);
+    let ribbon_col = mix(mauve_plum, ribbon_inner, ribbon);
 
     var escape_angle: f32;
     if dz_mag > 0.0 {
@@ -397,20 +407,28 @@ fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px:
     } else {
         escape_angle = atan2(z.y, z.x);
     }
-    let log_iter_fence = log2(smooth_iter + 1.0);
-    let phase = k * 0.5 * escape_angle + log_iter_fence * 3.0;
-    let raw = abs(sin(phase));
-    let fence = smoothstep(0.80, 0.97, raw);
+    let phase = k * 0.5 * escape_angle + log_iter * 2.8;
+    let peak = 0.5 + 0.5 * cos(phase);
+    let core = pow(peak, 18.0);
+    let halo_exp = max(1.5, 6.0 / activity);
+    let halo = pow(peak, halo_exp) * 0.35 * activity;
+    let fence_intensity = core + halo;
 
-    let green_dark  = vec3<f32>(0.235, 0.910, 0.533);
+    let tip_phase = fract(log_iter * 0.22);
+    let green_teal  = vec3<f32>(0.110, 0.780, 0.620);
+    let green_body  = vec3<f32>(0.235, 0.910, 0.533);
     let green_light = vec3<f32>(0.612, 1.000, 0.722);
-    let pink_tip    = vec3<f32>(0.941, 0.659, 0.784);
-    let green_body  = mix(green_dark, green_light, raw);
-    let green_col   = mix(green_body, pink_tip, smoothstep(0.97, 1.00, raw));
-
-    let background = vec3<f32>(0.024, 0.008, 0.071);
-    let fence_weight = fence * (1.0 - ribbon);
-    let exterior = mix(background, green_col, fence_weight);
+    let pink_flush  = vec3<f32>(0.941, 0.659, 0.784);
+    var post_col: vec3<f32>;
+    if tip_phase < 0.45 {
+        post_col = mix(green_teal, green_body, smoothstep(0.0, 0.45, tip_phase));
+    } else if tip_phase < 0.80 {
+        post_col = mix(green_body, green_light, smoothstep(0.45, 0.80, tip_phase));
+    } else {
+        post_col = mix(green_light, pink_flush, smoothstep(0.80, 1.00, tip_phase));
+    }
+    let sky = vec3<f32>(0.024, 0.008, 0.071);
+    let exterior = sky + post_col * fence_intensity * (1.0 - ribbon);
     return mix(exterior, ribbon_col, ribbon);
 }
 
