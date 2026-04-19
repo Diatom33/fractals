@@ -204,6 +204,7 @@ pub enum ColorPalette {
     Storm,       // 6: Oppressive brass murk with lightning
     Canopy,           // 7: Canopy with bright bokeh highlights (tone-mapped)
     Bioluminescence,  // 8: Deep-sea abyssal bioluminescence with depth-aware glow
+    Steve,            // 9: STEVE atmospheric ribbon — pastel mauve with green picket fence
 }
 
 impl ColorPalette {
@@ -217,6 +218,7 @@ impl ColorPalette {
         ColorPalette::Storm,
         ColorPalette::Canopy,
         ColorPalette::Bioluminescence,
+        ColorPalette::Steve,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -230,6 +232,7 @@ impl ColorPalette {
             ColorPalette::Storm => "Storm",
             ColorPalette::Canopy => "Canopy",
             ColorPalette::Bioluminescence => "Bioluminescence",
+            ColorPalette::Steve => "STEVE",
         }
     }
 
@@ -244,6 +247,7 @@ impl ColorPalette {
             ColorPalette::Storm => 6,
             ColorPalette::Canopy => 7,
             ColorPalette::Bioluminescence => 8,
+            ColorPalette::Steve => 9,
         }
     }
 
@@ -500,29 +504,39 @@ pub struct PerturbGpuParams {
 }
 
 /// One BLA node: applies 2^level perturbation iterations as δ ← A·δ + B·δc.
-/// A and B use mantissa+exponent for extended range (coefficients can grow exponentially).
-/// Layout matches WGSL struct (32 bytes, 16-byte aligned).
+/// A and B mantissas use double-single (hi, lo) for ~14-digit precision matching
+/// the DS-tracked δ — without this, multiplying DS δ by single-f32 A would silently
+/// truncate the lo bits of δ on every BLA step.
+/// Layout matches WGSL struct (48 bytes, 16-byte aligned: 4 vec4s).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BlaCoeff {
-    pub a: [f32; 2],         // 8 bytes — A mantissa (complex)
-    pub b: [f32; 2],         // 8 bytes — B mantissa (complex)
+    pub a: [f32; 4],         // 16 bytes — A as DS complex (re_hi, re_lo, im_hi, im_lo)
+    pub b: [f32; 4],         // 16 bytes — B as DS complex
     pub a_exp: i32,          // 4 bytes
     pub b_exp: i32,          // 4 bytes
     pub radius_log2: f32,    // 4 bytes — node valid when log2(|δ|) ≤ radius_log2
-    pub _pad: u32,           // 4 bytes
+    pub _pad: u32,           // 4 bytes (pad to 48 bytes)
 }
 
 impl Default for BlaCoeff {
     fn default() -> Self {
         // Default = invalid node (very negative radius_log2 → never selected)
         Self {
-            a: [0.0, 0.0], b: [0.0, 0.0],
+            a: [0.0; 4], b: [0.0; 4],
             a_exp: 0, b_exp: 0,
             radius_log2: -1.0e30,
             _pad: 0,
         }
     }
+}
+
+/// Split f64 into double-single f32 (hi + lo). |lo| ≤ ulp(hi)/2.
+#[inline]
+fn split_f64_to_ds(x: f64) -> (f32, f32) {
+    let hi = x as f32;
+    let lo = (x - hi as f64) as f32;
+    (hi, lo)
 }
 
 /// Data for perturbation rendering: reference orbit + metadata + optional BLA tree.
@@ -617,9 +631,13 @@ impl ExtComplex {
     }
 
     fn to_coeff_a(self, b: Self, radius_log2: f32) -> BlaCoeff {
+        let (a_re_hi, a_re_lo) = split_f64_to_ds(self.re);
+        let (a_im_hi, a_im_lo) = split_f64_to_ds(self.im);
+        let (b_re_hi, b_re_lo) = split_f64_to_ds(b.re);
+        let (b_im_hi, b_im_lo) = split_f64_to_ds(b.im);
         BlaCoeff {
-            a: [self.re as f32, self.im as f32],
-            b: [b.re as f32, b.im as f32],
+            a: [a_re_hi, a_re_lo, a_im_hi, a_im_lo],
+            b: [b_re_hi, b_re_lo, b_im_hi, b_im_lo],
             a_exp: self.exp,
             b_exp: b.exp,
             radius_log2,
@@ -917,10 +935,27 @@ pub fn compute_mandelbrot_with_bla(
                 continue;
             }
 
-            let a1 = ExtComplex { re: bla1.a[0] as f64, im: bla1.a[1] as f64, exp: bla1.a_exp };
-            let b1 = ExtComplex { re: bla1.b[0] as f64, im: bla1.b[1] as f64, exp: bla1.b_exp };
-            let a2 = ExtComplex { re: bla2.a[0] as f64, im: bla2.a[1] as f64, exp: bla2.a_exp };
-            let b2 = ExtComplex { re: bla2.b[0] as f64, im: bla2.b[1] as f64, exp: bla2.b_exp };
+            // Reconstruct DS coefficients (hi + lo) into f64 for combine accuracy.
+            let a1 = ExtComplex {
+                re: bla1.a[0] as f64 + bla1.a[1] as f64,
+                im: bla1.a[2] as f64 + bla1.a[3] as f64,
+                exp: bla1.a_exp,
+            };
+            let b1 = ExtComplex {
+                re: bla1.b[0] as f64 + bla1.b[1] as f64,
+                im: bla1.b[2] as f64 + bla1.b[3] as f64,
+                exp: bla1.b_exp,
+            };
+            let a2 = ExtComplex {
+                re: bla2.a[0] as f64 + bla2.a[1] as f64,
+                im: bla2.a[2] as f64 + bla2.a[3] as f64,
+                exp: bla2.a_exp,
+            };
+            let b2 = ExtComplex {
+                re: bla2.b[0] as f64 + bla2.b[1] as f64,
+                im: bla2.b[2] as f64 + bla2.b[3] as f64,
+                exp: bla2.b_exp,
+            };
 
             let a = a2.mul(a1);
             let b = a2.mul(b1).add(b2);

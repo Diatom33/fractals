@@ -49,11 +49,13 @@ struct PerturbParams {
 }
 
 // One BLA node: applies 2^level iterations as δ ← A·δ + B·δc.
-// A and B mantissas are f32 with separate i32 exponents for extended range.
+// A and B are DS-complex (re_hi, re_lo, im_hi, im_lo) so the BLA multiply
+// preserves DS precision in δ. Without DS coefficients, multiplying DS δ by
+// a single-f32 A throws away the lo bits of δ on every BLA step.
 // Tree layout: bla[n * num_levels + level] covers iterations [n, n + 2^level).
 struct BlaCoeff {
-    a: vec2<f32>,
-    b: vec2<f32>,
+    a: vec4<f32>,        // 16 bytes: a_re_hi, a_re_lo, a_im_hi, a_im_lo
+    b: vec4<f32>,        // 16 bytes: b_re_hi, b_re_lo, b_im_hi, b_im_lo
     a_exp: i32,
     b_exp: i32,
     radius_log2: f32,    // node valid when log2(|δ|) ≤ radius_log2
@@ -136,7 +138,8 @@ fn dsc_sq(
     let ii = ds_mul(a_im_hi, a_im_lo, a_im_hi, a_im_lo);
     let re = ds_add(rr.x, rr.y, -ii.x, -ii.y);
     let ri = ds_mul(a_re_hi, a_re_lo, a_im_hi, a_im_lo);
-    let im = vec2<f32>(2.0 * ri.x, 2.0 * ri.y);
+    // im = 2 * ri. Renormalize after scaling to surface any carry into the lo.
+    let im = fast_two_sum(2.0 * ri.x, 2.0 * ri.y);
     return vec4<f32>(re.x, re.y, im.x, im.y);
 }
 
@@ -150,18 +153,6 @@ fn dsc_add(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
 // Scale DS-complex by 2^e (exact when e small enough).
 fn dsc_ldexp(a: vec4<f32>, e: i32) -> vec4<f32> {
     return vec4<f32>(ldexp(a.x, e), ldexp(a.y, e), ldexp(a.z, e), ldexp(a.w, e));
-}
-
-// Renormalize: pull mantissa max into [1, 2), update exponent. Returns new
-// (mantissa.x = re_hi, .y = re_lo, .z = im_hi, .w = im_lo) with shift.
-// The shift_out value should be added to the prior exponent.
-fn dsc_renorm(a: vec4<f32>) -> vec4<f32> {
-    let mag = max(abs(a.x), abs(a.z));
-    if mag > 0.0 {
-        let shift = -i32(floor(log2(mag)));
-        return dsc_ldexp(a, shift);
-    }
-    return a;
 }
 
 // Returns the shift that dsc_renorm would apply (so caller can update exp).
@@ -251,16 +242,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (ref_i + skip) > ref_len { continue; }
                     let node = bla_tree[ref_i * max_lvl + L];
                     if node.radius_log2 >= delta_log2 {
-                        // Apply BLA: δ ← A·δ + B·δc with DS-precision mantissa math.
-                        // A and B are single-f32 mantissas; multiply (DS·single).
-                        // Build A as DS with lo=0 (single → DS lift).
+                        // Apply BLA: δ ← A·δ + B·δc with full DS×DS precision.
+                        // node.a/b are DS-complex (re_hi, re_lo, im_hi, im_lo).
                         let a_dsc = dsc_mul(
-                            node.a.x, 0.0, node.a.y, 0.0,
+                            node.a.x, node.a.y, node.a.z, node.a.w,
                             dn.x, dn.y, dn.z, dn.w,
                         );
                         let term_a_e = node.a_exp + dn_e;
                         let b_dsc = dsc_mul(
-                            node.b.x, 0.0, node.b.y, 0.0,
+                            node.b.x, node.b.y, node.b.z, node.b.w,
                             dc.x, dc.y, dc.z, dc.w,
                         );
                         let term_b_e = node.b_exp + dc_e;
