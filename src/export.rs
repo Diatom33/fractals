@@ -44,7 +44,7 @@ pub fn export_headless(
     let width = align_width(config.width);
     let height = config.height;
     let out_pixels = (width * height) as u64;
-    let ss = params.supersampling;
+    let ss = if params.palette.uses_neighbor_sampling() { 1 } else { params.supersampling };
     let use_median = params.use_median;
 
     status_callback(format!("Exporting {} at {}x{} ...", params.fractal_type.name(), width, height));

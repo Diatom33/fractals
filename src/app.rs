@@ -358,7 +358,7 @@ impl eframe::App for FractalApp {
                             let range = match self.params.palette {
                                 crate::fractals::ColorPalette::ThinFilm => 0.5..=12.0,
                                 crate::fractals::ColorPalette::Aurora => 0.5..=10.0,
-                                crate::fractals::ColorPalette::Storm => 2.0..=25.0,
+                                crate::fractals::ColorPalette::Storm => 0.2..=5.0,
                                 crate::fractals::ColorPalette::Bioluminescence => 0.5..=20.0,
                                 _ => 0.0..=1.0,
                             };

@@ -700,7 +700,10 @@ impl GpuState {
     pub fn render(&mut self, params: &FractalParams, effective_ss: u32, use_median: bool) {
         let start = std::time::Instant::now();
 
-        let ss = effective_ss;
+        // Neighbor-sampling palettes (Storm, Bioluminescence) compute screen-space
+        // gradients from adjacent pixels. SS shifts the iteration landscape per sample,
+        // moving gradient features to different positions — averaging/median produces noise.
+        let ss = if params.palette.uses_neighbor_sampling() { 1 } else { effective_ss };
         let wg_x = (self.display_width + 15) / 16;
         let wg_y = (self.height + 15) / 16;
 

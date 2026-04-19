@@ -28,7 +28,7 @@ struct Params {
     num_samples: u32,
     coloring_param: f32,
     real_pixel_step: vec2<f32>,
-    _pad: vec2<u32>,
+    noise_seed: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -249,10 +249,11 @@ fn fbm_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
 }
 
 // Palette 6: Storm Threshold — dark atmosphere with bright lightning at steep iteration gradients.
-// fBm noise in complex-plane coordinates masks lightning into sparse patches.
-// Uses real_pixel_step (not pixel_step which is mantissa in perturbation mode).
+// fBm noise masks lightning into sparse patches. Noise lives in complex-plane coordinates
+// but is reconstructed via screen_offset/cell_px + noise_seed to avoid f32 precision loss.
+// noise_seed is computed on the CPU from rug::Float center, so panning is perfectly smooth.
 fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
-    let steepness = params.coloring_param;
+    let noise_scale = params.coloring_param;
     let stride_val = params.stride;
     let h = params.resolution.y;
     let px = idx % stride_val;
@@ -272,26 +273,24 @@ fn palette_storm(smooth_iter: f32, idx: u32) -> vec3<f32> {
     }
     let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
 
-    // Complex-plane coordinates using real_pixel_step (correct even in perturbation mode)
-    let cx = params.center_hi.x + params.center_lo.x
-           + (f32(px) - f32(params.resolution.x) * 0.5) * params.real_pixel_step.x;
-    let cy = params.center_hi.y + params.center_lo.y
-           + (f32(py) - f32(params.resolution.y) * 0.5) * params.real_pixel_step.y;
-    let complex_pos = vec2<f32>(cx, cy);
+    // Noise in complex-plane coords, reconstructed without f32 precision loss.
+    // screen_offset / cell_px = pixel's fractional position in noise grid.
+    // noise_seed = fract(center / cell_size) computed on CPU with arbitrary precision.
+    // Together: (px - w/2)/cell_px + seed ≡ z / cell_size (mod 1 in the seed).
+    // Panning shifts the seed smoothly; zooming changes cell_size proportionally.
+    let cell_px = 55.0 * noise_scale;
+    let noise_pos = vec2<f32>(
+        (f32(px) - f32(params.resolution.x) * 0.5) / cell_px + params.noise_seed.x,
+        (f32(py) - f32(params.resolution.y) * 0.5) / cell_px + params.noise_seed.y
+    );
 
-    // Dynamic octaves: more detail as zoom increases
-    let octaves = clamp(i32(floor(-log2(params.real_pixel_step.x)) - 5.0), 3, 12);
-
-    // fBm at ~1.5 base freq: produces broad patches with fractal detail inside
-    let noise_val = fbm_noise(complex_pos * 1.5, octaves);
-
-    // Soft threshold: bright spots where noise > 0.5, dark voids where < 0.5
+    let noise_val = fbm_noise(noise_pos, 5);
     let mask = smoothstep(0.35, 0.65, noise_val);
 
     // Sigmoid contrast on base value
     let log_iter = log2(smooth_iter + 1.0);
     let x_val = fract(log_iter * 0.06);
-    let v = 1.0 / (1.0 + exp(-steepness * (x_val - 0.5)));
+    let v = 1.0 / (1.0 + exp(-10.0 * (x_val - 0.5)));
 
     // Visible base: storm blue → steel grey → bronze
     let hue = 220.0 / 360.0 + 0.08 * v;

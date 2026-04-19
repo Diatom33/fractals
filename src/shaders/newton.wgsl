@@ -22,7 +22,7 @@ struct Params {
     num_samples: u32,
     coloring_param: f32,
     real_pixel_step: vec2<f32>,
-    _pad: vec2<u32>,
+    noise_seed: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;

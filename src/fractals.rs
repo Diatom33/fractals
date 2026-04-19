@@ -252,11 +252,18 @@ impl ColorPalette {
         match self {
             ColorPalette::ThinFilm => 2.0,   // angular lobe count
             ColorPalette::Aurora => 3.0,      // band frequency
-            ColorPalette::Storm => 10.0,      // sigmoid steepness
+            ColorPalette::Storm => 1.0,       // noise scale
             ColorPalette::Canopy => 3.0,      // trap scale
             ColorPalette::Bioluminescence => 5.0, // murkiness
             _ => 0.0,
         }
+    }
+
+    /// Whether this palette reads neighbor pixels (screen-space gradients/glow).
+    /// These palettes can't be multi-sample averaged — gradient features shift with
+    /// sub-pixel offsets, producing noise instead of smooth highlights.
+    pub fn uses_neighbor_sampling(&self) -> bool {
+        matches!(self, ColorPalette::Storm | ColorPalette::Bioluminescence)
     }
 
     /// Whether this palette uses the coloring_param slider.
@@ -269,7 +276,7 @@ impl ColorPalette {
         match self {
             ColorPalette::ThinFilm => "Iridescence lobes",
             ColorPalette::Aurora => "Band frequency",
-            ColorPalette::Storm => "Contrast",
+            ColorPalette::Storm => "Noise scale",
             ColorPalette::Canopy => "Trap scale",
             ColorPalette::Bioluminescence => "Murkiness",
             _ => "",
@@ -383,6 +390,29 @@ impl FractalParams {
         let cy_hi = cy_f64 as f32;
         let cy_lo = (cy_f64 - cy_hi as f64) as f32;
 
+        // Compute noise seed: center in noise-cell units (fractional part).
+        // Using rug for arbitrary precision so panning is perfectly smooth at any zoom.
+        // noise_cell_size = 55 pixels * coloring_param * pixel_step (complex-plane units).
+        let noise_cell_px = 55.0_f64 * (self.coloring_param as f64).max(0.1);
+        let cell_size_x = noise_cell_px * step_x;
+        let cell_size_y = noise_cell_px * step_y;
+        let noise_seed_x = if cell_size_x > 0.0 {
+            let cell = Float::with_val(128, cell_size_x);
+            let ratio = Float::with_val(128, &self.center_re / cell);
+            let floor_val = ratio.clone().floor();
+            Float::with_val(128, ratio - floor_val).to_f64() as f32
+        } else {
+            0.0f32
+        };
+        let noise_seed_y = if cell_size_y > 0.0 {
+            let cell = Float::with_val(128, cell_size_y);
+            let ratio = Float::with_val(128, &self.center_im / cell);
+            let floor_val = ratio.clone().floor();
+            Float::with_val(128, ratio - floor_val).to_f64() as f32
+        } else {
+            0.0f32
+        };
+
         GpuParams {
             center_hi: [cx_hi, cy_hi],
             center_lo: [cx_lo, cy_lo],
@@ -407,7 +437,7 @@ impl FractalParams {
             num_samples: 1,
             coloring_param: self.coloring_param,
             real_pixel_step: [step_x as f32, step_y as f32],
-            _pad: [0; 2],
+            noise_seed: [noise_seed_x, noise_seed_y],
         }
     }
 }
@@ -678,6 +708,6 @@ pub struct GpuParams {
     pub num_samples: u32,          // 4 bytes  (offset 88) — total number of samples
     pub coloring_param: f32,       // 4 bytes  (offset 92) — palette-specific parameter
     pub real_pixel_step: [f32; 2], // 8 bytes  (offset 96) — always true pixel step (even in perturbation)
-    pub _pad: [u32; 2],           // 8 bytes  (offset 104) — pad to 112 (multiple of 16)
+    pub noise_seed: [f32; 2],     // 8 bytes  (offset 104) — fBm noise seed from rug center
 }
 // Total: 112 bytes
