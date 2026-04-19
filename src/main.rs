@@ -350,7 +350,9 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
     if let Some(pos) = args.iter().position(|a| a == "--power") {
         if let Some(val) = args.get(pos + 1) {
             if let Ok(p) = val.parse::<f32>() {
-                params.power = p;
+                // Clamp to match UI slider range; negative powers would make
+                // u32(round(power)) undefined in the shader's integer path.
+                params.power = p.clamp(2.0, 8.0);
             }
         }
     }
