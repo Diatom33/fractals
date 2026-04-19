@@ -156,9 +156,12 @@ fn dsc_ldexp(a: vec4<f32>, e: i32) -> vec4<f32> {
 }
 
 // Returns the shift that dsc_renorm would apply (so caller can update exp).
+// Guarded against denormal mag (log2 returns -inf there on FTZ hardware,
+// then floor(-inf) → i32::MIN and -shift overflows to garbage). Below
+// ~1e-30 we accept slight loss rather than risk an exponent blowup.
 fn dsc_renorm_shift(a: vec4<f32>) -> i32 {
     let mag = max(abs(a.x), abs(a.z));
-    if mag > 0.0 {
+    if mag > 1.0e-30 && mag < 1.0e30 {
         return -i32(floor(log2(mag)));
     }
     return 0;
@@ -402,9 +405,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             break;
         }
 
-        // Rebase: when |z_full| < |delta|, glitch correction.
-        let dn_mag2 = dot(dn_real, dn_real);
-        if mag2 < dn_mag2 {
+        // Rebase (Pauldelbrot-style glitch correction): trigger when |z_full|² is
+        // much smaller than the reference orbit's |Z|². This catches cases where the
+        // pixel's true orbit has wandered to a different attractor than the reference,
+        // which produces salt-and-pepper noise in nominally-interior regions.
+        // Using the reference Z's magnitude (not δ's) avoids the underflow problem
+        // where ldexp(dn, dn_e) flushes to zero at deep zoom and dn_mag2 becomes 0.
+        let z_ref_re = select(ref_orbit[ref_i - 1u].x, ref_orbit[ref_i].x, ref_i < ref_len);
+        let z_ref_im = select(ref_orbit[ref_i - 1u].y, ref_orbit[ref_i].y, ref_i < ref_len);
+        let z_ref_mag2 = z_ref_re * z_ref_re + z_ref_im * z_ref_im;
+        // Glitch threshold: |z_full|² < ε² × |Z|² means perturbation has tunneled.
+        // ε = 1e-3 → ε² = 1e-6 (Zhuoran's recommended default).
+        if mag2 < 1.0e-6 * z_ref_mag2 {
             dn = vec4<f32>(z_full.x, 0.0, z_full.y, 0.0);
             dn_e = 0;
             ref_i = 0u;
