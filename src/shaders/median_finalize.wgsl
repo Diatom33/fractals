@@ -362,26 +362,39 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32) -> vec3<f32> {
 
 // Palette 9: STEVE — pastel lilac/mauve ribbon with green picket-fence posts.
 fn palette_steve(smooth_iter: f32) -> vec3<f32> {
-    let two_pi = 6.2831853;
     let k = params.coloring_param;
     let log_iter = log2(smooth_iter + 1.0);
-    let t = fract(log_iter * 0.08);
+    let t = fract(log_iter * 0.55);
 
-    let a = vec3<f32>(0.55, 0.38, 0.62);
-    let b = vec3<f32>(0.35, 0.22, 0.35);
-    let c = vec3<f32>(0.90, 0.95, 1.00);
-    let d = vec3<f32>(0.00, 0.12, 0.28);
-    let base = a + b * cos(two_pi * (c * t + d));
+    let c0 = vec3<f32>(0.024, 0.008, 0.071);
+    let c1 = vec3<f32>(0.290, 0.122, 0.322);
+    let c2 = vec3<f32>(0.706, 0.541, 0.831);
+    let c3 = vec3<f32>(0.831, 0.659, 0.910);
+    let c4 = vec3<f32>(0.957, 0.863, 0.973);
+    var base: vec3<f32>;
+    if (t < 0.25) {
+        base = mix(c0, c1, smoothstep(0.0, 0.25, t));
+    } else if (t < 0.55) {
+        base = mix(c1, c2, smoothstep(0.25, 0.55, t));
+    } else if (t < 0.70) {
+        base = mix(c2, c3, smoothstep(0.55, 0.70, t));
+    } else if (t < 0.85) {
+        base = mix(c3, c4, smoothstep(0.70, 0.85, t));
+    } else {
+        base = mix(c4, c0, smoothstep(0.85, 1.00, t));
+    }
 
     let raw = abs(sin(k * t));
     let fence = smoothstep(0.92, 0.99, raw);
     let ribbon_mask = smoothstep(0.35, 0.50, t) * (1.0 - smoothstep(0.80, 0.95, t));
 
-    let green_body = vec3<f32>(0.235, 0.910, 0.533);  // #3CE888
-    let pink_tip   = vec3<f32>(0.941, 0.659, 0.784);  // #F0A8C8
-    let fence_col  = mix(green_body, pink_tip, fence);
+    let green_dark  = vec3<f32>(0.235, 0.910, 0.533);
+    let green_light = vec3<f32>(0.612, 1.000, 0.722);
+    let pink_tip    = vec3<f32>(0.941, 0.659, 0.784);
+    let green_body  = mix(green_dark, green_light, raw);
+    let green_col   = mix(green_body, pink_tip, smoothstep(0.97, 1.00, raw));
 
-    return mix(base, fence_col, fence * ribbon_mask);
+    return mix(base, green_col, fence * ribbon_mask);
 }
 
 // Palette 10: Inverted Pair — high-contrast sinusoidal bands between complementary colors.
