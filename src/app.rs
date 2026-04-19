@@ -247,6 +247,7 @@ impl eframe::App for FractalApp {
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .max_height(ui.available_height())
                     .show(ui, |ui| {
                         // ── Fractal Type ──────────────────────────────
                         section_header(ui, "Fractal Type");
