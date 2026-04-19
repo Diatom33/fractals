@@ -766,7 +766,14 @@ impl GpuState {
             let is_mandelbrot = params.fractal_type == crate::fractals::FractalType::Mandelbrot;
             let need_recompute = match &self.cached_ref_orbit {
                 None => true,
-                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc, prev_hrx, prev_hry, _prev_bla)) => {
+                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc, prev_hrx, prev_hry, prev_bla)) => {
+                    // Also recompute when dropping from "too large for BLA" (bla_num_levels=0
+                    // at >250k iters) back down to a range where BLA would be valid — otherwise
+                    // the cached no-BLA state sticks and performance suffers.
+                    let recover_bla = is_mandelbrot
+                        && *prev_bla == 0
+                        && *prev_iter > 250_000
+                        && params.max_iter <= 250_000;
                     *prev_re != params.center_re
                         || *prev_im != params.center_im
                         || *prev_iter < params.max_iter
@@ -774,6 +781,7 @@ impl GpuState {
                         || *prev_jc != params.julia_c
                         || *prev_hrx != params.half_range_x
                         || *prev_hry != params.half_range_y
+                        || recover_bla
                 }
             };
 
