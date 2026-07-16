@@ -23,7 +23,8 @@
 | `src/shaders/escape.wgsl` | shader | Escape-time iteration, double-single coordinates |
 | `src/shaders/escape_perturb.wgsl` | shader | Deep-zoom perturbation iteration + BLA + glitch correction |
 | `src/shaders/newton.wgsl` | shader | Newton, Nova Julia, Nova Mandelbrot iteration |
-| `src/shaders/colorize.wgsl` | shader | All 11 palettes: escape-time smooth + root-basin modes |
+| `src/shaders/palettes.wgsl` | shader | Shared palette library (all 16 palettes + signal helpers), spliced into colorize + median_finalize by `src/shaders.rs` |
+| `src/shaders/colorize.wgsl` | shader | Escape-time smooth + root-basin coloring, Oklab accumulation |
 | `src/shaders/finalize.wgsl` | shader | Divides accumulated samples by weight, packs to RGBA |
 | `src/shaders/median_finalize.wgsl` | shader | Median-of-samples AA + coloring in one pass |
 | `src/shaders/nebula_sample.wgsl` | shader | Buddhabrot orbit sampling into RGB histograms |
@@ -43,6 +44,18 @@ wgpu's `copy_buffer_to_texture` requires `bytes_per_row` to be a multiple of 256
 
 ### vec2 * vec2 in WGSL
 `vec2<f32> * vec2<f32>` is component-wise multiplication, NOT scalar broadcast. To multiply a complex number by a scalar, use `scalar * vec` (f32 * vec2), not `vec2(scalar, 0.0) * vec`. The latter zeros the imaginary part.
+
+### Per-pixel Signal Conventions
+`final_z` per pixel is `(z.re, z.im, log2|dz|, arg(dz))` — the derivative is
+tracked in extended range (mantissa + exponent) through escape, perturbation,
+and BLA, so it never overflows. `final_z.z <= -1e29` means "no derivative"
+(Multibrot, Newton). `arg(dz)` decorrelates spatially at perturbation depths —
+use `dz_angle_usable()` for raw-angle effects; the difference `arg(z) - arg(dz)`
+(relief normal) stays smooth at any depth. `orbit_traps` content is
+palette-dependent (`aux_mode()` in the iterate shaders): trap distances for
+Canopy, `(stripe_avg, stripe_prev, interior_field, 0)` for palettes 11+.
+Palettes needing per-iteration orbit data must be in
+`ColorPalette::needs_per_step_orbit()` so BLA is disabled for them.
 
 ### GpuParams Struct Alignment
 `GpuParams` in `fractals.rs` must match the WGSL `Params` struct exactly — same field order, same sizes, padded to 128 bytes. It's `#[repr(C)]` with `bytemuck::Pod + Zeroable`. If you add a field, add it in both places and adjust `_pad`. The Params struct must be updated in ALL SIX `.wgsl` files that define it (escape, escape_perturb, newton, colorize, finalize, median_finalize).

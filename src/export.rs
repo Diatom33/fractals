@@ -427,9 +427,10 @@ impl ExportContext {
             let delta_c_max = params.half_range_x.hypot(params.half_range_y).max(1e-300);
             self.ensure_orbit(params, pixel_step, delta_c_max, status)?;
             let cache = self.orbit_cache.as_ref().unwrap();
-            // Orbit traps only sample on single-step iterations; keep the
-            // Canopy palette per-step so BLA jumps don't starve its highlights.
-            let bla_num_levels = if params.palette == fractals::ColorPalette::Canopy {
+            // Orbit traps / stripes / interior fields only sample on
+            // single-step iterations; keep those palettes per-step so BLA
+            // jumps don't starve their accumulators.
+            let bla_num_levels = if params.palette.needs_per_step_orbit() {
                 0
             } else {
                 cache.bla_num_levels

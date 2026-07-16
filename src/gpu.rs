@@ -773,9 +773,10 @@ impl GpuState {
 
         // Upload reference orbit if using perturbation (cached to avoid recomputation).
         // BLA tree built only for plain Mandelbrot — other variants use single-step perturbation.
-        // Orbit traps are only sampled on single-step iterations, so BLA jumps
-        // would starve the Canopy palette's trap-based highlights — run it per-step.
-        let disable_bla = params.palette == crate::fractals::ColorPalette::Canopy;
+        // Orbit traps / stripe averages / interior fields are only sampled on
+        // single-step iterations, so BLA jumps would starve palettes that need
+        // per-iteration orbit data — run those per-step.
+        let disable_bla = params.palette.needs_per_step_orbit();
         if use_perturb {
             let ft_idx = params.fractal_type.shader_index();
             let is_mandelbrot = params.fractal_type == crate::fractals::FractalType::Mandelbrot;

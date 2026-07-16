@@ -5,10 +5,17 @@
 // orbit_traps, roots.
 //
 // escape_color entry point:
-//   escape_color(smooth_iter, z, dz_mag, dz_angle, px, py, sample_base)
+//   escape_color(smooth_iter, z, dz_log2, dz_angle, px, py, sample_base)
+// dz_log2 = log2(|dz/dc|) from the iterate shaders (extended-range tracking,
+// valid at any iteration count and through perturbation/BLA); DZ_NONE when no
+// derivative is available (Multibrot, Newton). dz_angle = arg(dz).
 // sample_base is the offset into `iterations` of the sample slot to use for
 // screen-space gradient palettes (colorize passes the current sample's slot,
 // median passes 0 = the first sample's landscape).
+//
+// Palettes 11+ additionally read orbit_traps as (stripe_avg, stripe_prev,
+// interior_field, 0) — see aux_mode() in the iterate shaders — and color
+// interior pixels via interior_color().
 
 // -- HSV to RGB ---------------------------------------------------------------
 
@@ -118,6 +125,57 @@ fn fbm_noise(p: vec2<f32>, num_octaves: i32) -> f32 {
     return total / max_val;
 }
 
+// ── Derivative-based signal helpers ───────────────────────────────────────
+
+// Sentinel in final_z.z when the iterate shader tracked no derivative.
+const DZ_NONE_THRESHOLD: f32 = -1.0e29;
+
+fn dz_available(dz_log2: f32) -> bool {
+    return dz_log2 > DZ_NONE_THRESHOLD;
+}
+
+// arg(dz) winds roughly once per iteration, so at perturbation depths (huge
+// iteration counts) it decorrelates between adjacent pixels into noise.
+// Palettes that use the RAW angle should fall back to arg(z) there; the
+// DIFFERENCE arg(z) - arg(dz) (relief normal) stays smooth at any depth.
+fn dz_angle_usable(dz_log2: f32) -> bool {
+    return dz_available(dz_log2) && params.pixel_step_log2 > -23.0;
+}
+
+// log2 of the exterior distance estimate in PIXEL units.
+// DE = |z|·ln|z| / |dz|; dividing by the true pixel step makes it
+// zoom-invariant, so DE-driven features keep constant screen width.
+fn de_log2_px(z: vec2<f32>, dz_log2: f32) -> f32 {
+    let mag2 = max(dot(z, z), 1.000001);
+    let log2_z = 0.5 * log2(mag2);
+    let ln_z = max(log2_z * 0.69314718, 1e-9);
+    return log2_z + log2(ln_z) - dz_log2 - params.pixel_step_log2;
+}
+
+// Boundary distance in pixels, clamped to [0, +inf) in log space.
+fn de_px(z: vec2<f32>, dz_log2: f32) -> f32 {
+    return exp2(clamp(de_log2_px(z, dz_log2), -20.0, 24.0));
+}
+
+// Relief lighting from the escape-direction normal u = z/dz (only the
+// direction matters). azimuth = light direction, height = how high the sun
+// sits (higher = flatter, lower = more dramatic shadows). Returns [0, 1].
+fn relief_shade(z: vec2<f32>, dz_angle: f32, azimuth: f32, height: f32) -> f32 {
+    let ang = atan2(z.y, z.x) - dz_angle;
+    let u = vec2<f32>(cos(ang), sin(ang));
+    let l = vec2<f32>(cos(azimuth), sin(azimuth));
+    let t = (dot(u, l) + height) / (1.0 + height);
+    return clamp(t, 0.0, 1.0);
+}
+
+// Interpolated stripe-average, computed by the iterate shaders into
+// orbit_traps.xy for palettes 11+. Blending the n and n-1 averages with the
+// fractional iteration kills last-iteration banding.
+fn stripe_value(idx: u32, smooth_iter: f32) -> f32 {
+    let aux = orbit_traps[idx];
+    return mix(aux.y, aux.x, clamp(fract(smooth_iter), 0.0, 1.0));
+}
+
 // Screen-space gradient of the smooth-iteration landscape at (px, py) within
 // the sample slot starting at sample_base. High magnitude ⇒ near the boundary.
 fn iter_gradient(px: u32, py: u32, sample_base: u32) -> vec2<f32> {
@@ -178,15 +236,15 @@ fn palette_mono(smooth_iter: f32) -> vec3<f32> {
 // Palette 4: Thin-Film Interference (soap bubble / oil slick)
 // Maps smooth_iter to "optical thickness", modulates by derivative angle for band-free directional iridescence.
 // arg(dz) is smooth across iteration boundaries (unlike arg(z) which doubles each iteration).
-fn palette_thin_film(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32) -> vec3<f32> {
+fn palette_thin_film(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32) -> vec3<f32> {
     let k = params.coloring_param; // angular lobe count
     let log_iter = log2(smooth_iter + 1.0);
     let t_base = sqrt(log_iter * 0.5);
 
     // Use derivative angle for directional bands (smooth, no iteration banding)
-    // Falls back to arg(z) when derivative not available (perturbation/Newton)
+    // Falls back to arg(z) when unavailable (Multibrot/Newton) or too deep.
     var viewing: f32;
-    if dz_mag > 0.0 {
+    if dz_angle_usable(dz_log2) {
         viewing = abs(cos(dz_angle * k));
     } else {
         let angle = atan2(z.y, z.x);
@@ -415,7 +473,7 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32, sample_base: u32) -> vec3<
 // like Bioluminescence's boundary detection); the exterior is the picket-fence
 // field, with each green picket oriented parallel to the local escape direction
 // (like thin-film's dz_angle bands).
-fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: u32, py: u32, sample_base: u32) -> vec3<f32> {
+fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, px: u32, py: u32, sample_base: u32) -> vec3<f32> {
     // "Activity" = atmospheric intensity (analogous to Biolum's murkiness).
     // Scales ribbon width, halo spread, and fence brightness together so the
     // aurora can go from faint post-glimmer to bright charged-sky vibe.
@@ -458,7 +516,7 @@ fn palette_steve(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px:
     //    Each post's phase combines angle + log_iter so posts have finite
     //    vertical extent (in iter axis) instead of one long radial ridge.
     var escape_angle: f32;
-    if dz_mag > 0.0 {
+    if dz_angle_usable(dz_log2) {
         escape_angle = dz_angle;
     } else {
         escape_angle = atan2(z.y, z.x);
@@ -531,19 +589,197 @@ fn palette_inverted_pair(smooth_iter: f32) -> vec3<f32> {
     return linear_to_srgb(linear);
 }
 
+// Palette 11: Obsidian — relief-lit volcanic glass. The exterior is a dark
+// cooled lava field embossed by the escape-direction normal, with a tight
+// warm specular glint; the set boundary smolders through as an ember rim
+// whose screen width is zoom-invariant (distance estimation).
+fn palette_obsidian(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32) -> vec3<f32> {
+    let azimuth = params.coloring_param;
+    let log_iter = log2(smooth_iter + 1.0);
+    // cold green-grey glass, slowly breathing with depth
+    let base = vec3<f32>(0.020, 0.028, 0.030) + vec3<f32>(0.008, 0.012, 0.010) * cos(log_iter * 0.4);
+    var col = base;
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, azimuth, 1.2);
+        // diffuse sheen
+        col = base + vec3<f32>(0.10, 0.13, 0.15) * shade * shade;
+        // tight torchlight glint on the glass
+        let spec = pow(shade, 48.0);
+        col += vec3<f32>(0.90, 0.82, 0.70) * spec * 0.8;
+        // ember rim: the boundary glows through cracks in the crust
+        let de = de_px(z, dz_log2);
+        let ember_w = max(params.coloring_param_2, 0.25);
+        let ember = exp(-de / ember_w);
+        col += vec3<f32>(1.00, 0.30, 0.05) * ember * ember * 1.2;
+        // heat haze further from the crack
+        col += vec3<f32>(0.30, 0.05, 0.02) * exp(-de / (ember_w * 4.0)) * 0.35;
+    }
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Palette 12: Noctilucent — night-shining clouds. Stripe-average wisps in
+// electric silver-blue drift over a deep twilight sky, with a faint cold
+// sheen where the set boundary approaches.
+fn palette_noctilucent(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, idx: u32) -> vec3<f32> {
+    let contrast = max(params.coloring_param_2, 0.1);
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    // twilight gradient: deep blue breathing toward horizon purple
+    let sky = mix(
+        vec3<f32>(0.012, 0.020, 0.055),
+        vec3<f32>(0.045, 0.020, 0.075),
+        0.5 + 0.5 * cos(log_iter * 0.25),
+    );
+    // wisp field, contrast-shaped
+    let wisp = pow(s, contrast * 2.0);
+    // silver at high altitude (shallow), electric blue deeper in
+    let cloud = mix(
+        vec3<f32>(0.55, 0.75, 1.00),
+        vec3<f32>(0.85, 0.93, 1.00),
+        0.5 + 0.5 * cos(log_iter * 0.18 + 1.0),
+    );
+    var col = sky + cloud * wisp * 0.9;
+    if dz_available(dz_log2) {
+        let de = de_px(z, dz_log2);
+        col += vec3<f32>(0.35, 0.55, 0.90) * exp(-de / 3.0) * 0.5;
+    }
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Palette 13: Lichtenberg — fossilized lightning. Thin amber filaments branch
+// where the stripe field crosses its midline; the set boundary itself is the
+// white-hot trunk the discharge grew from.
+fn palette_lichtenberg(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, idx: u32) -> vec3<f32> {
+    let sharp = max(params.coloring_param_2, 1.0);
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    // filaments at the stripe midline crossings
+    let line = pow(1.0 - abs(2.0 * s - 1.0), sharp);
+    let log_iter = log2(smooth_iter + 1.0);
+    // charred substrate
+    let substrate = vec3<f32>(0.030, 0.016, 0.010) + vec3<f32>(0.020, 0.010, 0.004) * cos(log_iter * 0.3);
+    let amber = vec3<f32>(1.00, 0.55, 0.12);
+    let core  = vec3<f32>(1.00, 0.90, 0.60);
+    var col = substrate + amber * line * 0.85 + core * pow(line, 4.0) * 0.7;
+    if dz_available(dz_log2) {
+        let de = de_px(z, dz_log2);
+        let trunk = exp(-de / 2.0);
+        col += vec3<f32>(1.00, 0.45, 0.08) * trunk * 0.9;
+        col += vec3<f32>(1.00, 0.85, 0.50) * trunk * trunk * 0.6;
+    }
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Palette 14: Corona — the set boundary as a neon plasma filament of
+// constant screen width at any zoom depth (pure distance estimation),
+// hue drifting slowly along the discharge, over near-black void.
+fn palette_corona(smooth_iter: f32, z: vec2<f32>, dz_log2: f32) -> vec3<f32> {
+    let width = max(params.coloring_param, 0.25);   // filament width in pixels
+    let drift = params.coloring_param_2;
+    let log_iter = log2(smooth_iter + 1.0);
+    var col = vec3<f32>(0.004, 0.003, 0.010);
+    if dz_available(dz_log2) {
+        let de = de_px(z, dz_log2);
+        let hue_angle = log_iter * drift * 6.28318;
+        let neon = vec3<f32>(
+            0.45 + 0.35 * cos(hue_angle + 1.2),
+            0.30 + 0.30 * cos(hue_angle + 3.6),
+            0.85 + 0.15 * cos(hue_angle + 5.2),
+        );
+        let filament = exp(-de / width);
+        let halo = exp(-de / (width * 6.0));
+        col += neon * halo * 0.35;
+        col += neon * filament * 0.9;
+        col += vec3<f32>(1.0) * pow(filament, 3.0) * 0.8;   // white-hot core
+    }
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Palette 15: Slot Canyon — sandstone strata carved by the stripe field and
+// lit by a low warm keylight (relief shading), with distance-estimation
+// crevice occlusion and reflected glow in the deepest cracks.
+fn palette_slot_canyon(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let azimuth = params.coloring_param;
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    // strata: deep umber → glowing coral → pale peach
+    let umber = vec3<f32>(0.26, 0.10, 0.05);
+    let coral = vec3<f32>(0.85, 0.35, 0.12);
+    let peach = vec3<f32>(1.00, 0.72, 0.45);
+    var albedo = mix(umber, coral, smoothstep(0.15, 0.60, s));
+    albedo = mix(albedo, peach, smoothstep(0.70, 0.95, s));
+    // slow bounce-light drift with depth
+    albedo *= 0.85 + 0.15 * cos(log_iter * 0.2);
+    var col = albedo * 0.25;
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, azimuth, 0.8);
+        col = albedo * (0.20 + 0.80 * shade * shade);
+        // sun-kissed rim highlights
+        col += vec3<f32>(1.00, 0.80, 0.55) * pow(shade, 24.0) * 0.35;
+        // crevice occlusion near the boundary...
+        let de = de_px(z, dz_log2);
+        col *= 1.0 - 0.65 * exp(-de / 3.0);
+        // ...with reflected ember glow in the deepest cracks
+        col += vec3<f32>(0.55, 0.16, 0.04) * exp(-de / 1.2) * 0.6;
+    }
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// ── Interior coloring (palettes 11+) ────────────────────────────────────────
+// Classic palettes keep pure-black interiors. The new palettes read the
+// interior field — the orbit-average of exp(-|z|), a smooth bounded value
+// the iterate shaders store in orbit_traps.z — and give the set body a
+// material of its own.
+
+fn palette_has_interior(p: u32) -> bool {
+    return p >= 11u;
+}
+
+fn interior_color(z: vec2<f32>, idx: u32) -> vec3<f32> {
+    let f = clamp(orbit_traps[idx].z, 0.0, 1.0);
+    switch params.palette {
+        case 11u: {
+            // polished black glass with a faint cold flow-banding
+            let v = smoothstep(0.1, 0.9, f);
+            return vec3<f32>(0.010, 0.012, 0.016) + vec3<f32>(0.05, 0.07, 0.09) * v * v;
+        }
+        case 12u: {
+            // starless night sky below the clouds
+            return vec3<f32>(0.004, 0.006, 0.016) + vec3<f32>(0.006, 0.010, 0.024) * f;
+        }
+        case 13u: {
+            // charred wood
+            return vec3<f32>(0.014, 0.007, 0.004) + vec3<f32>(0.020, 0.008, 0.002) * f;
+        }
+        case 14u: {
+            // dim violet core light
+            return vec3<f32>(0.012, 0.006, 0.030) + vec3<f32>(0.05, 0.02, 0.10) * smoothstep(0.2, 0.9, f);
+        }
+        case 15u: {
+            // deep canyon shadow, faintly warm
+            return vec3<f32>(0.050, 0.020, 0.012) * (0.4 + 0.6 * f);
+        }
+        default: { return vec3<f32>(0.0); }
+    }
+}
+
 // Dispatch to selected palette (returns sRGB)
-fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_mag: f32, dz_angle: f32, px: u32, py: u32, sample_base: u32) -> vec3<f32> {
+fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, px: u32, py: u32, sample_base: u32) -> vec3<f32> {
     switch params.palette {
         case 1u: { return palette_oklab(smooth_iter); }
         case 2u: { return palette_smooth(smooth_iter); }
         case 3u: { return palette_mono(smooth_iter); }
-        case 4u: { return palette_thin_film(smooth_iter, z, dz_mag, dz_angle); }
+        case 4u: { return palette_thin_film(smooth_iter, z, dz_log2, dz_angle); }
         case 5u: { return palette_aurora(smooth_iter); }
         case 6u: { return palette_storm(smooth_iter, px, py, sample_base); }
         case 7u: { return palette_canopy(smooth_iter, py * params.stride + px); }
         case 8u: { return palette_biolum(smooth_iter, px, py, sample_base); }
-        case 9u: { return palette_steve(smooth_iter, z, dz_mag, dz_angle, px, py, sample_base); }
+        case 9u: { return palette_steve(smooth_iter, z, dz_log2, dz_angle, px, py, sample_base); }
         case 10u: { return palette_inverted_pair(smooth_iter); }
+        case 11u: { return palette_obsidian(smooth_iter, z, dz_log2, dz_angle); }
+        case 12u: { return palette_noctilucent(smooth_iter, z, dz_log2, py * params.stride + px); }
+        case 13u: { return palette_lichtenberg(smooth_iter, z, dz_log2, py * params.stride + px); }
+        case 14u: { return palette_corona(smooth_iter, z, dz_log2); }
+        case 15u: { return palette_slot_canyon(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         default: { return palette_classic(smooth_iter); }
     }
 }

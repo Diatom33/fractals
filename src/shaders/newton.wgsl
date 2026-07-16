@@ -24,7 +24,7 @@ struct Params {
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
     coloring_param_2: f32,
-    _pad_128a: u32,
+    pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
     _pad_128b: u32,
     _pad_128c: u32,
 }
@@ -262,6 +262,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
     iterations[iter_idx] = iter;
-    final_z[idx] = vec4<f32>(z.x, z.y, 0.0, 0.0);
+    // final_z.z carries log2(|dz|) in the escape shaders; Newton doesn't track
+    // a derivative, so write the "no derivative" sentinel.
+    final_z[idx] = vec4<f32>(z.x, z.y, -1.0e30, 0.0);
     orbit_traps[idx] = trap_min;
 }

@@ -37,10 +37,29 @@ effectively unlimited from the math side:
 
 ## Coloring
 
-Eleven palettes (Classic HSV, Oklab, Smooth Gradient, Monochrome, Thin Film,
-Midnight Aurora, Storm, Canopy, Bioluminescence, STEVE, Inverted Pair), most
-with one or two live parameter sliders. Escape-time fractals use smooth
-iteration coloring; Newton/Nova use root-basin coloring.
+Sixteen palettes, most with one or two live parameter sliders. Escape-time
+fractals use smooth iteration coloring; Newton/Nova use root-basin coloring.
+
+Classic HSV, Oklab, Smooth Gradient, Monochrome, Thin Film, Midnight Aurora,
+Storm, Canopy, Bioluminescence, STEVE, Inverted Pair — plus five palettes
+built on richer per-pixel signals:
+
+- **Obsidian** — relief-lit volcanic glass: the escape-direction derivative
+  becomes a surface normal (movable light azimuth), the boundary smolders
+  through as a zoom-invariant ember rim (distance estimation).
+- **Noctilucent** — night-shining clouds: orbit stripe-averages form silvery
+  wisps over a twilight sky.
+- **Lichtenberg** — fossilized lightning: stripe filaments branch off the
+  white-hot boundary trunk in amber.
+- **Corona** — the boundary as a neon plasma filament of constant screen
+  width at any zoom depth, hue drifting along the discharge.
+- **Slot Canyon** — sandstone strata carved by stripe fields, lit by a low
+  warm keylight with crevice occlusion and reflected ember glow.
+
+The new palettes also color the set **interior** (orbit-average field) instead
+of leaving it black, and their signals — extended-range derivative (arg + log2
+magnitude, tracked through perturbation and BLA), distance estimation, stripe
+averages, interior field — are available for building more.
 
 Two anti-aliasing modes:
 
@@ -76,7 +95,8 @@ cargo run --release -- --export out.png \
     --width 3840 --height 2160 \
     --iter 50000 \               # max iterations (10..=1000000)
     --ss 3 \                     # supersampling: 1=off, 2=6x6, 3=8x8
-    --palette steve \            # classic|oklab|smooth|mono|thinfilm|aurora|storm|canopy|biolum|steve|ip
+    --palette steve \            # classic|oklab|smooth|mono|thinfilm|aurora|storm|canopy|biolum|
+                                 # steve|ip|obsidian|noctilucent|lichtenberg|corona|slotcanyon
     --median | --no-median \     # AA filter (default: median)
     --bounds -2.5,1.0,-1.25,1.25 # x_min,x_max,y_min,y_max
 

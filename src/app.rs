@@ -399,11 +399,23 @@ impl eframe::App for FractalApp {
                                 crate::fractals::ColorPalette::Bioluminescence => 0.5..=20.0,
                                 crate::fractals::ColorPalette::Steve => 0.2..=3.0,
                                 crate::fractals::ColorPalette::InvertedPair => 0.02..=0.30,
+                                crate::fractals::ColorPalette::Obsidian
+                                | crate::fractals::ColorPalette::SlotCanyon => {
+                                    0.0..=std::f32::consts::TAU
+                                }
+                                crate::fractals::ColorPalette::Noctilucent => 0.5..=16.0,
+                                crate::fractals::ColorPalette::Lichtenberg => 0.5..=20.0,
+                                crate::fractals::ColorPalette::Corona => 0.5..=16.0,
                                 _ => 0.0..=1.0,
+                            };
+                            let step = match self.params.palette {
+                                crate::fractals::ColorPalette::Obsidian
+                                | crate::fractals::ColorPalette::SlotCanyon => 0.02,
+                                _ => 0.1,
                             };
                             if ui.add(
                                 egui::Slider::new(&mut self.params.coloring_param, range)
-                                    .step_by(0.1)
+                                    .step_by(step)
                             ).changed() {
                                 self.needs_render = true;
                             }
@@ -415,10 +427,17 @@ impl eframe::App for FractalApp {
                             ui.label(self.params.palette.param2_label());
                             let range2 = match self.params.palette {
                                 crate::fractals::ColorPalette::Steve => 0.02..=1.0,
+                                crate::fractals::ColorPalette::Obsidian => 0.25..=8.0,
+                                crate::fractals::ColorPalette::Noctilucent => 0.3..=4.0,
+                                crate::fractals::ColorPalette::Lichtenberg => 2.0..=40.0,
+                                crate::fractals::ColorPalette::Corona => 0.0..=0.6,
+                                crate::fractals::ColorPalette::SlotCanyon => 0.5..=16.0,
                                 _ => 0.0..=1.0,
                             };
                             let step2 = match self.params.palette {
                                 crate::fractals::ColorPalette::Steve => 0.01,
+                                crate::fractals::ColorPalette::Corona => 0.01,
+                                crate::fractals::ColorPalette::Lichtenberg => 0.5,
                                 _ => 0.1,
                             };
                             if ui.add(

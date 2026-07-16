@@ -33,7 +33,7 @@ struct Params {
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
     coloring_param_2: f32,
-    _pad_128a: u32,
+    pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
     _pad_128b: u32,
     _pad_128c: u32,
 }
@@ -63,23 +63,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let smooth_iter = iterations[sample_base + idx];
     let fz = final_z[idx];
     let z = fz.xy;
-    let dz_mag = fz.z;
+    let dz_log2 = fz.z;
     let dz_angle = fz.w;
     let wt = params.sample_weight;
     let prev = accum[idx];
 
-    // Interior samples (hit max_iter): don't accumulate any color.
-    // Their coverage is inferred in finalize as (total_weight - exterior_weight) / total_weight.
+    // Interior samples (hit max_iter): classic palettes don't accumulate any
+    // color — their coverage is inferred in finalize as
+    // (total_weight - exterior_weight) / total_weight, compositing to black.
+    // Palettes with an interior material accumulate its color like any sample.
     let is_interior = smooth_iter >= max_iter;
     if is_interior {
-        // Interior contributes nothing to accum — coverage tracked implicitly
+        if params.color_mode == 0u && palette_has_interior(params.palette) {
+            let icol = interior_color(z, idx);
+            accum[idx] = prev + vec4<f32>(srgb_to_oklab(icol) * wt, wt);
+        }
         return;
     }
 
     // Exterior sample: compute color, convert to Oklab for perceptually uniform averaging
     var srgb_color: vec3<f32>;
     if params.color_mode == 0u {
-        srgb_color = escape_color(smooth_iter, z, dz_mag, dz_angle, x, y, sample_base);
+        srgb_color = escape_color(smooth_iter, z, dz_log2, dz_angle, x, y, sample_base);
     } else {
         srgb_color = basin_color(smooth_iter, z, params.num_roots);
     }

@@ -426,6 +426,11 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
                 "bioluminescence" | "biolum" | "abyss" => fractals::ColorPalette::Bioluminescence,
                 "steve" => fractals::ColorPalette::Steve,
                 "invertedpair" | "inverted" | "inverted-pair" | "ip" => fractals::ColorPalette::InvertedPair,
+                "obsidian" => fractals::ColorPalette::Obsidian,
+                "noctilucent" | "noctilucent-clouds" => fractals::ColorPalette::Noctilucent,
+                "lichtenberg" | "lightning" => fractals::ColorPalette::Lichtenberg,
+                "corona" | "filament" => fractals::ColorPalette::Corona,
+                "slotcanyon" | "slot-canyon" | "canyon" => fractals::ColorPalette::SlotCanyon,
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();

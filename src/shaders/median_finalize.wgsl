@@ -29,7 +29,7 @@ struct Params {
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
     coloring_param_2: f32,
-    _pad_128a: u32,
+    pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
     _pad_128b: u32,
     _pad_128c: u32,
 }
@@ -80,9 +80,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // All interior — pure black
+    // Interior color: black for classic palettes, the palette's interior
+    // material for palettes 11+.
+    let fz_i = final_z[idx];
+    var icolor = vec3<f32>(0.0);
+    if params.color_mode == 0u && palette_has_interior(params.palette) {
+        icolor = interior_color(fz_i.xy, idx);
+    }
+
+    // All interior
     if ext_count == 0u {
-        output[idx] = pack_rgba(vec3<f32>(0.0));
+        output[idx] = pack_rgba(icolor);
         return;
     }
 
@@ -108,20 +116,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Color the median iteration value
-    let fz = final_z[idx];
-    let z = fz.xy;
-    let dz_mag = fz.z;
-    let dz_angle = fz.w;
+    let z = fz_i.xy;
+    let dz_log2 = fz_i.z;
+    let dz_angle = fz_i.w;
     var color: vec3<f32>;
     if params.color_mode == 1u {
         color = basin_color(median_iter, z, params.num_roots);
     } else {
-        color = escape_color(median_iter, z, dz_mag, dz_angle, x, y, 0u);
+        color = escape_color(median_iter, z, dz_log2, dz_angle, x, y, 0u);
     }
 
     // Composite with interior coverage
     let ext_coverage = f32(ext_count) / f32(n);
-    let final_color = color * ext_coverage;
+    let final_color = mix(icolor, color, ext_coverage);
 
     output[idx] = pack_rgba(final_color);
 }

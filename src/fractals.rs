@@ -207,6 +207,11 @@ pub enum ColorPalette {
     Bioluminescence,  // 8: Deep-sea abyssal bioluminescence with depth-aware glow
     Steve,            // 9: STEVE atmospheric ribbon — pastel mauve with green picket fence
     InvertedPair,     // 10: High-contrast sinusoidal bands between complementary color pairs
+    Obsidian,         // 11: Relief-lit volcanic glass with ember rim (dz lighting + DE)
+    Noctilucent,      // 12: Night-shining clouds — stripe-average wisps on twilight sky
+    Lichtenberg,      // 13: Fossilized lightning — stripe filaments + DE trunk
+    Corona,           // 14: Zoom-invariant neon plasma filament (pure DE)
+    SlotCanyon,       // 15: Relief-lit sandstone strata with crevice occlusion
 }
 
 impl ColorPalette {
@@ -222,6 +227,11 @@ impl ColorPalette {
         ColorPalette::Bioluminescence,
         ColorPalette::Steve,
         ColorPalette::InvertedPair,
+        ColorPalette::Obsidian,
+        ColorPalette::Noctilucent,
+        ColorPalette::Lichtenberg,
+        ColorPalette::Corona,
+        ColorPalette::SlotCanyon,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -237,6 +247,11 @@ impl ColorPalette {
             ColorPalette::Bioluminescence => "Bioluminescence",
             ColorPalette::Steve => "STEVE",
             ColorPalette::InvertedPair => "Inverted Pair",
+            ColorPalette::Obsidian => "Obsidian",
+            ColorPalette::Noctilucent => "Noctilucent",
+            ColorPalette::Lichtenberg => "Lichtenberg",
+            ColorPalette::Corona => "Corona",
+            ColorPalette::SlotCanyon => "Slot Canyon",
         }
     }
 
@@ -253,6 +268,11 @@ impl ColorPalette {
             ColorPalette::Bioluminescence => 8,
             ColorPalette::Steve => 9,
             ColorPalette::InvertedPair => 10,
+            ColorPalette::Obsidian => 11,
+            ColorPalette::Noctilucent => 12,
+            ColorPalette::Lichtenberg => 13,
+            ColorPalette::Corona => 14,
+            ColorPalette::SlotCanyon => 15,
         }
     }
 
@@ -266,6 +286,11 @@ impl ColorPalette {
             ColorPalette::Bioluminescence => 5.0, // murkiness
             ColorPalette::InvertedPair => 0.08, // band frequency
             ColorPalette::Steve => 1.0,        // aurora activity (1.0 = nominal)
+            ColorPalette::Obsidian => 2.4,     // light azimuth (radians)
+            ColorPalette::Noctilucent => 5.0,  // wisp density (stripe frequency)
+            ColorPalette::Lichtenberg => 6.0,  // branch density (stripe frequency)
+            ColorPalette::Corona => 3.0,       // filament width (pixels)
+            ColorPalette::SlotCanyon => 4.2,   // light azimuth (radians)
             _ => 0.0,
         }
     }
@@ -277,9 +302,27 @@ impl ColorPalette {
         matches!(self, ColorPalette::Storm | ColorPalette::Bioluminescence | ColorPalette::Steve)
     }
 
+    /// Whether this palette needs per-iteration orbit data (orbit traps,
+    /// stripe averages, interior field). BLA iteration-skipping starves those
+    /// accumulators, so it's disabled while one of these palettes is active.
+    pub fn needs_per_step_orbit(&self) -> bool {
+        matches!(
+            self,
+            ColorPalette::Canopy
+                | ColorPalette::Obsidian
+                | ColorPalette::Noctilucent
+                | ColorPalette::Lichtenberg
+                | ColorPalette::Corona
+                | ColorPalette::SlotCanyon
+        )
+    }
+
     /// Whether this palette uses the coloring_param slider.
     pub fn has_param(&self) -> bool {
-        matches!(self, ColorPalette::ThinFilm | ColorPalette::Aurora | ColorPalette::Storm | ColorPalette::Canopy | ColorPalette::Bioluminescence | ColorPalette::InvertedPair | ColorPalette::Steve)
+        !matches!(
+            self,
+            ColorPalette::Classic | ColorPalette::Oklab | ColorPalette::Smooth | ColorPalette::Monochrome
+        )
     }
 
     /// Label for the coloring_param slider.
@@ -292,6 +335,11 @@ impl ColorPalette {
             ColorPalette::Bioluminescence => "Murkiness",
             ColorPalette::InvertedPair => "Band frequency",
             ColorPalette::Steve => "Activity",
+            ColorPalette::Obsidian => "Light azimuth",
+            ColorPalette::Noctilucent => "Wisp density",
+            ColorPalette::Lichtenberg => "Branch density",
+            ColorPalette::Corona => "Filament width",
+            ColorPalette::SlotCanyon => "Light azimuth",
             _ => "",
         }
     }
@@ -299,20 +347,38 @@ impl ColorPalette {
     /// Default second-parameter value (where relevant).
     pub fn default_param_2(&self) -> f32 {
         match self {
-            ColorPalette::Steve => 0.22,  // post color cycle rate
+            ColorPalette::Steve => 0.22,       // post color cycle rate
+            ColorPalette::Obsidian => 2.0,     // ember rim width (pixels)
+            ColorPalette::Noctilucent => 1.4,  // wisp contrast
+            ColorPalette::Lichtenberg => 10.0, // filament sharpness
+            ColorPalette::Corona => 0.12,      // hue drift rate
+            ColorPalette::SlotCanyon => 4.0,   // strata density (stripe frequency)
             _ => 0.0,
         }
     }
 
     /// Whether this palette exposes a second slider.
     pub fn has_param_2(&self) -> bool {
-        matches!(self, ColorPalette::Steve)
+        matches!(
+            self,
+            ColorPalette::Steve
+                | ColorPalette::Obsidian
+                | ColorPalette::Noctilucent
+                | ColorPalette::Lichtenberg
+                | ColorPalette::Corona
+                | ColorPalette::SlotCanyon
+        )
     }
 
     /// Label for the second slider.
     pub fn param2_label(&self) -> &'static str {
         match self {
             ColorPalette::Steve => "Post hue cycle",
+            ColorPalette::Obsidian => "Ember width",
+            ColorPalette::Noctilucent => "Wisp contrast",
+            ColorPalette::Lichtenberg => "Filament sharpness",
+            ColorPalette::Corona => "Hue drift",
+            ColorPalette::SlotCanyon => "Strata density",
             _ => "",
         }
     }
@@ -478,7 +544,8 @@ impl FractalParams {
             real_pixel_step: [step_x as f32, step_y as f32],
             noise_seed: [noise_seed_x, noise_seed_y],
             coloring_param_2: self.coloring_param_2,
-            _pad_128: [0; 3],
+            pixel_step_log2: step_x.log2() as f32,
+            _pad_128: [0; 2],
         }
     }
 }
@@ -1089,6 +1156,7 @@ pub struct GpuParams {
     pub real_pixel_step: [f32; 2], // 8 bytes  (offset 96) — always true pixel step (even in perturbation)
     pub noise_seed: [f32; 2],     // 8 bytes  (offset 104) — fBm noise seed from rug center
     pub coloring_param_2: f32,    // 4 bytes  (offset 112) — second palette-specific parameter
-    pub _pad_128: [u32; 3],       // 12 bytes (offset 116) — pad to 128
+    pub pixel_step_log2: f32,     // 4 bytes  (offset 116) — log2 of true pixel step (any zoom depth)
+    pub _pad_128: [u32; 2],       // 8 bytes  (offset 120) — pad to 128
 }
 // Total: 128 bytes

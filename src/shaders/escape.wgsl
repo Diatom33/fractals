@@ -26,7 +26,7 @@ struct Params {
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
     coloring_param_2: f32,
-    _pad_128a: u32,
+    pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
     _pad_128b: u32,
     _pad_128c: u32,
 }
@@ -148,6 +148,40 @@ fn cpow(z: vec2<f32>, d: f32) -> vec2<f32> {
     return vec2<f32>(new_r * cos(new_theta), new_r * sin(new_theta));
 }
 
+// ── Extended-range derivative tracking ───────────────────────────────────────
+// dz grows like |2z|^n and overflows plain f32 past ~128 iterations, so it is
+// kept as mantissa (xy) * 2^exponent (z). Palettes receive log2(|dz|) + arg(dz).
+
+// Sentinel written to final_z.z when no derivative is available.
+const DZ_NONE: f32 = -1.0e30;
+
+// Re-anchor the mantissa when it drifts far from unit magnitude.
+fn dz_renorm(v: vec3<f32>) -> vec3<f32> {
+    let m2 = v.x * v.x + v.y * v.y;
+    if m2 > 1.0e12 || (m2 > 0.0 && m2 < 1.0e-12) {
+        let sh = floor(log2(m2) * 0.5);
+        return vec3<f32>(v.xy * exp2(-sh), v.z + sh);
+    }
+    return v;
+}
+
+// Which auxiliary per-orbit data the active palette wants in orbit_traps:
+// 0 = trap distances (Canopy), 1 = stripe average + interior field (11+), 2 = none.
+fn aux_mode() -> u32 {
+    if params.palette == 7u { return 0u; }
+    if params.palette >= 11u { return 1u; }
+    return 2u;
+}
+
+// Stripe angular frequency for the stripe-average palettes.
+fn stripe_k() -> f32 {
+    switch params.palette {
+        case 12u, 13u: { return params.coloring_param; }
+        case 15u: { return params.coloring_param_2; }
+        default: { return 4.0; }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 @compute @workgroup_size(16, 16)
@@ -205,12 +239,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_i = params.max_iter;
     var iter: u32 = max_i;
 
-    // Derivative tracking: dz/dc (Mandelbrot-like) or dz/dz₀ (Julia)
-    // Used for smooth modulation in coloring (eliminates iteration banding)
+    // Derivative tracking: dz/dc (Mandelbrot-like) or dz/dz₀ (Julia), in
+    // extended range (mantissa xy, log2 exponent z). Used for smooth palette
+    // modulation, relief lighting, and distance estimation.
     let is_julia = params.fractal_type == 1u;
-    var dz_r: f32 = select(0.0, 1.0, is_julia);
-    var dz_i: f32 = 0.0;
+    var dz = vec3<f32>(select(0.0, 1.0, is_julia), 0.0, 0.0);
     let dz_offset = select(1.0, 0.0, is_julia);
+
+    // Auxiliary per-orbit accumulators (palette-dependent)
+    let amode = aux_mode();
+    let sk = stripe_k();
+    var stripe_sum: f32 = 0.0;
+    var stripe_last: f32 = 0.0;
+    var exp_sum: f32 = 0.0;
+    var aux_n: f32 = 0.0;
 
     // Multibrot power (only used when fractal_type == 3).
     // Snap to integer when very close so integer powers use exact ds_cpow_int;
@@ -221,15 +263,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var i: u32 = 0u; i < max_i; i++) {
 
-        // Derivative update: dz' = 2*z*dz + offset (before z is modified)
-        // Skip for Multibrot (d != 2, formula is d*z^(d-1)*dz which needs cpow)
+        // Derivative update: dz' = 2*z*dz + offset (before z is modified).
+        // Skip for Multibrot (d != 2, formula is d*z^(d-1)*dz which needs cpow).
         if params.fractal_type != 3u {
-            let pzr = zr.x;
-            let pzi = zi.x;
-            let new_dr = 2.0 * (pzr * dz_r - pzi * dz_i) + dz_offset;
-            let new_di = 2.0 * (pzr * dz_i + pzi * dz_r);
-            dz_r = new_dr;
-            dz_i = new_di;
+            if dz_offset != 0.0 && dz.z < -60.0 {
+                // |2z·dz| is vanishing next to the +1 offset: dz' ≈ 1.
+                dz = vec3<f32>(1.0, 0.0, 0.0);
+            } else {
+                let pz = vec2<f32>(zr.x, zi.x);
+                var ndz = 2.0 * cmul(pz, dz.xy);
+                // +offset, rescaled into the current exponent; negligible
+                // once the exponent is large.
+                if dz_offset != 0.0 && dz.z <= 120.0 {
+                    ndz.x += dz_offset * exp2(-dz.z);
+                }
+                dz = dz_renorm(vec3<f32>(ndz, dz.z));
+            }
         }
 
         // ── Multibrot (type 3): z = z^d + c ─────────────────────────────
@@ -299,12 +348,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             zi = ds_add(two_zri, ci);
         }
 
-        // Orbit trap distances (use hi part only — sufficient for trap proximity)
+        // Auxiliary orbit data (use hi part only — sufficient precision)
         let z_pos = vec2<f32>(zr.x, zi.x);
-        trap_min.x = min(trap_min.x, length(z_pos - trap0));
-        trap_min.y = min(trap_min.y, length(z_pos - trap1));
-        trap_min.z = min(trap_min.z, length(z_pos - trap2));
-        trap_min.w = min(trap_min.w, length(z_pos - trap3));
+        if amode == 0u {
+            trap_min.x = min(trap_min.x, length(z_pos - trap0));
+            trap_min.y = min(trap_min.y, length(z_pos - trap1));
+            trap_min.z = min(trap_min.z, length(z_pos - trap2));
+            trap_min.w = min(trap_min.w, length(z_pos - trap3));
+        } else if amode == 1u {
+            // Stripe average (flowing angular bands) + interior field
+            // (orbit-average of exp(-|z|), bounded and max_iter-stable).
+            let s = 0.5 + 0.5 * sin(sk * atan2(z_pos.y, z_pos.x));
+            stripe_last = s;
+            stripe_sum += s;
+            exp_sum += exp(-length(z_pos));
+            aux_n += 1.0;
+        }
 
         // Escape test (f32 is sufficient for |z|² > 256)
         if zr.x * zr.x + zi.x * zi.x > escape_r2 {
@@ -330,8 +389,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
     iterations[iter_idx] = smooth_val;
-    let dz_mag = sqrt(dz_r * dz_r + dz_i * dz_i);
-    let dz_angle = atan2(dz_i, dz_r);
-    final_z[idx] = vec4<f32>(zr.x, zi.x, dz_mag, dz_angle);
-    orbit_traps[idx] = trap_min;
+
+    // final_z carries log2(|dz|) + arg(dz); DZ_NONE marks "no derivative".
+    var dz_log2 = DZ_NONE;
+    var dz_angle = 0.0;
+    let dzm2 = dz.x * dz.x + dz.y * dz.y;
+    if dzm2 > 0.0 {
+        dz_log2 = dz.z + 0.5 * log2(dzm2);
+        dz_angle = atan2(dz.y, dz.x);
+    }
+    final_z[idx] = vec4<f32>(zr.x, zi.x, dz_log2, dz_angle);
+
+    if amode == 1u {
+        let n_eff = max(aux_n, 1.0);
+        let avg = stripe_sum / n_eff;
+        let prev = select(avg, (stripe_sum - stripe_last) / max(n_eff - 1.0, 1.0), aux_n > 1.5);
+        orbit_traps[idx] = vec4<f32>(avg, prev, exp_sum / n_eff, 0.0);
+    } else {
+        orbit_traps[idx] = trap_min;
+    }
 }

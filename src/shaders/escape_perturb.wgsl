@@ -40,7 +40,7 @@ struct Params {
     real_pixel_step: vec2<f32>,
     noise_seed: vec2<f32>,
     coloring_param_2: f32,
-    _pad_128a: u32,
+    pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
     _pad_128b: u32,
     _pad_128c: u32,
 }
@@ -178,6 +178,39 @@ fn signf(x: f32) -> f32 {
     return select(-1.0, 1.0, x >= 0.0);
 }
 
+// ── Extended-range derivative tracking (see escape.wgsl) ────────────────────
+// dz = d(full z)/dc as mantissa (xy) * 2^exponent (z). Invariant under rebase
+// (rebasing changes reference bookkeeping, not z itself). Through a BLA jump,
+// dδ'/dδc = A·(dδ/dδc) + B — the same node coefficients that advance δ.
+
+const DZ_NONE: f32 = -1.0e30;
+
+fn dz_renorm(v: vec3<f32>) -> vec3<f32> {
+    let m2 = v.x * v.x + v.y * v.y;
+    if m2 > 1.0e12 || (m2 > 0.0 && m2 < 1.0e-12) {
+        let sh = floor(log2(m2) * 0.5);
+        return vec3<f32>(v.xy * exp2(-sh), v.z + sh);
+    }
+    return v;
+}
+
+// Which auxiliary per-orbit data the active palette wants in orbit_traps:
+// 0 = trap distances (Canopy), 1 = stripe average + interior field (11+), 2 = none.
+// Per-step palettes disable BLA host-side so these accumulators see every iteration.
+fn aux_mode() -> u32 {
+    if params.palette == 7u { return 0u; }
+    if params.palette >= 11u { return 1u; }
+    return 2u;
+}
+
+fn stripe_k() -> f32 {
+    switch params.palette {
+        case 12u, 13u: { return params.coloring_param; }
+        case 15u: { return params.coloring_param_2; }
+        default: { return 4.0; }
+    }
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -230,6 +263,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let trap3 = vec2<f32>(-0.5, -0.866);
     var trap_min = vec4<f32>(1e20, 1e20, 1e20, 1e20);
 
+    // Derivative dz/dc (dz/dz₀ for Julia), extended range.
+    var dz = vec3<f32>(select(0.0, 1.0, is_julia), 0.0, 0.0);
+    let dz_offset = select(1.0, 0.0, is_julia);
+
+    // Auxiliary per-orbit accumulators (palette-dependent, single-step only)
+    let amode = aux_mode();
+    let sk = stripe_k();
+    var stripe_sum: f32 = 0.0;
+    var stripe_last: f32 = 0.0;
+    var exp_sum: f32 = 0.0;
+    var aux_n: f32 = 0.0;
+
     var iter: u32 = max_i;
     var ref_i: u32 = 0u;
     var i: u32 = 0u;
@@ -278,6 +323,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         sum = dsc_ldexp(sum, s);
                         dn = sum;
                         dn_e = e_max - s;
+
+                        // Derivative through the jump: dz ← A·dz + B (hi parts
+                        // suffice — dz feeds lighting/DE, not the orbit).
+                        let a_hi = vec2<f32>(node.a.x, node.a.z);
+                        let b_hi = vec2<f32>(node.b.x, node.b.z);
+                        let adz = vec2<f32>(
+                            a_hi.x * dz.x - a_hi.y * dz.y,
+                            a_hi.x * dz.y + a_hi.y * dz.x,
+                        );
+                        let term_a_l2 = f32(node.a_exp) + dz.z;
+                        let term_b_l2 = f32(node.b_exp);
+                        let lmax = max(term_a_l2, term_b_l2);
+                        let ndz = adz * exp2(term_a_l2 - lmax) + b_hi * exp2(term_b_l2 - lmax);
+                        dz = dz_renorm(vec3<f32>(ndz, lmax));
+
                         ref_i = ref_i + skip;
                         step = skip;
                         break;
@@ -295,6 +355,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             Zn_im_hi = Zn.y;
             let Zn_re_lo = Zn.z;
             let Zn_im_lo = Zn.w;
+
+            // Derivative update from the pre-step full z: dz' = 2·z·dz + offset.
+            // (Variant abs-folds are treated as locally linear, matching the
+            // shallow-zoom escape shader's approximation.)
+            {
+                let z_pre = vec2<f32>(
+                    Zn_re_hi + ldexp(dn.x, dn_e) + ldexp(dn.y, dn_e),
+                    Zn_im_hi + ldexp(dn.z, dn_e) + ldexp(dn.w, dn_e),
+                );
+                if dz_offset != 0.0 && dz.z < -60.0 {
+                    dz = vec3<f32>(1.0, 0.0, 0.0);
+                } else {
+                    var ndz = 2.0 * vec2<f32>(
+                        z_pre.x * dz.x - z_pre.y * dz.y,
+                        z_pre.x * dz.y + z_pre.y * dz.x,
+                    );
+                    if dz_offset != 0.0 && dz.z <= 120.0 {
+                        ndz.x += dz_offset * exp2(-dz.z);
+                    }
+                    dz = dz_renorm(vec3<f32>(ndz, dz.z));
+                }
+            }
 
             // ── Pre-square modification on Z and δ ──────────────────
             // For Burning Ship and Tricorn, modify the operands by sign/conjugation.
@@ -396,12 +478,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             z_full = vec2<f32>(Zn_last.x, Zn_last.y) + dn_real;
         }
 
-        // Orbit trap distances (only on single-step iterations).
+        // Auxiliary orbit data (only on single-step iterations — palettes
+        // needing it disable BLA host-side).
         if step == 1u {
-            trap_min.x = min(trap_min.x, length(z_full - trap0));
-            trap_min.y = min(trap_min.y, length(z_full - trap1));
-            trap_min.z = min(trap_min.z, length(z_full - trap2));
-            trap_min.w = min(trap_min.w, length(z_full - trap3));
+            if amode == 0u {
+                trap_min.x = min(trap_min.x, length(z_full - trap0));
+                trap_min.y = min(trap_min.y, length(z_full - trap1));
+                trap_min.z = min(trap_min.z, length(z_full - trap2));
+                trap_min.w = min(trap_min.w, length(z_full - trap3));
+            } else if amode == 1u {
+                let s = 0.5 + 0.5 * sin(sk * atan2(z_full.y, z_full.x));
+                stripe_last = s;
+                stripe_sum += s;
+                exp_sum += exp(-length(z_full));
+                aux_n += 1.0;
+            }
         }
 
         // Escape check
@@ -469,15 +560,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let iter_idx = params.sample_index * params.stride * params.resolution.y + idx;
     iterations[iter_idx] = smooth_val;
 
+    // final_z carries log2(|dz|) + arg(dz) like the escape shader.
+    var dz_log2 = DZ_NONE;
+    var dz_angle = 0.0;
+    let dzm2 = dz.x * dz.x + dz.y * dz.y;
+    if dzm2 > 0.0 {
+        dz_log2 = dz.z + 0.5 * log2(dzm2);
+        dz_angle = atan2(dz.y, dz.x);
+    }
+
     let dn_out_re = ldexp(dn.x, dn_e) + ldexp(dn.y, dn_e);
     let dn_out_im = ldexp(dn.z, dn_e) + ldexp(dn.w, dn_e);
     let dn_out = vec2<f32>(dn_out_re, dn_out_im);
     if ref_i < ref_len {
         let Zn_o = ref_orbit[ref_i];
         let zf = vec2<f32>(Zn_o.x, Zn_o.y) + dn_out;
-        final_z[idx] = vec4<f32>(zf.x, zf.y, 0.0, 0.0);
+        final_z[idx] = vec4<f32>(zf.x, zf.y, dz_log2, dz_angle);
     } else {
-        final_z[idx] = vec4<f32>(dn_out.x, dn_out.y, 0.0, 0.0);
+        final_z[idx] = vec4<f32>(dn_out.x, dn_out.y, dz_log2, dz_angle);
     }
-    orbit_traps[idx] = trap_min;
+
+    if amode == 1u {
+        let n_eff = max(aux_n, 1.0);
+        let avg = stripe_sum / n_eff;
+        let prev = select(avg, (stripe_sum - stripe_last) / max(n_eff - 1.0, 1.0), aux_n > 1.5);
+        orbit_traps[idx] = vec4<f32>(avg, prev, exp_sum / n_eff, 0.0);
+    } else {
+        orbit_traps[idx] = trap_min;
+    }
 }
