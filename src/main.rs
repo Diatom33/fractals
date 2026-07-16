@@ -115,8 +115,10 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
         } else { default_nebula_view(width, height) }
     } else { default_nebula_view(width, height) };
 
+    // Same sample region as the GUI paths (nebula.rs / gpu.rs) so CLI and GUI
+    // renders of the same view match.
     let sample_min = [-2.5f32, -1.5f32];
-    let sample_max = [1.5f32, 1.5f32];
+    let sample_max = [1.0f32, 1.5f32];
 
     println!("Nebulabrot export: {}x{} -> {}", width, height, path);
     println!("  Samples: {}, Iters: R={}, G={}, B={}", total_samples, max_iter_r, max_iter_g, max_iter_b);
@@ -127,8 +129,17 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
     })).expect("No GPU adapter found");
+    let adapter_limits = adapter.limits();
     let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor { label: Some("nebulabrot export"), ..Default::default() },
+        &wgpu::DeviceDescriptor {
+            label: Some("nebulabrot export"),
+            required_limits: wgpu::Limits {
+                max_buffer_size: adapter_limits.max_buffer_size.min(1 << 31),
+                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         None,
     )).expect("Failed to create device");
 
@@ -267,9 +278,11 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
         let data = slice.get_mapped_range();
         let values: &[u32] = bytemuck::cast_slice(&data);
         let mut nonzero: Vec<u32> = values.iter().copied().filter(|&v| v > 0).collect();
+        // 99.9th percentile, matching the GUI paths (nebula.rs / gpu.rs) so CLI
+        // and GUI renders normalize to the same brightness.
         let exposure = if nonzero.is_empty() { 0 } else {
             nonzero.sort_unstable();
-            nonzero[((nonzero.len() as f64 * 0.995) as usize).min(nonzero.len() - 1)]
+            nonzero[((nonzero.len() as f64 * 0.999) as usize).min(nonzero.len() - 1)]
         };
         drop(data);
         hist_readback_buf.unmap();
@@ -438,10 +451,15 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         if zoom_extent > 0.0 {
             // Precision needs to comfortably exceed the requested depth.
             let prec_bits = (((-zoom_extent.log10()).max(16.0) * 4.0) as u32 + 64).max(128);
-            let cre_f = rug::Float::parse(cre.as_str()).expect("invalid --center-re").complete(prec_bits);
-            let cim_f = rug::Float::parse(cim.as_str()).expect("invalid --center-im").complete(prec_bits);
-            params.center_re = cre_f;
-            params.center_im = cim_f;
+            let parse_or_exit = |arg: &str, flag: &str| match rug::Float::parse(arg) {
+                Ok(p) => p.complete(prec_bits),
+                Err(e) => {
+                    eprintln!("Invalid {flag} value {arg:?}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            params.center_re = parse_or_exit(cre.as_str(), "--center-re");
+            params.center_im = parse_or_exit(cim.as_str(), "--center-im");
             // Aspect-correct: half_range_x = zoom/2 in x, half_range_y matches view aspect
             let aspect = (args.iter().position(|a| a == "--width").and_then(|p| args.get(p + 1))
                 .and_then(|v| v.parse::<u32>().ok()).unwrap_or(1920)) as f64

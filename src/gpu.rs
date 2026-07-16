@@ -713,10 +713,9 @@ impl GpuState {
             rebuild_bg = true;
         }
         // BLA storage: ref_len * num_levels, where num_levels ≈ ceil(log2(ref_len)) + 1.
-        // Cap at 250k iterations to bound memory (~240 MB). Above that, BLA is
-        // disabled in compute_mandelbrot_with_bla and per-step perturbation takes
-        // over. Keep buffer size at the cap so we never exceed the 1 GB wgpu limit.
-        let bla_cap = needed.min(250_001);
+        // Above BLA_MAX_REF_LEN, BLA is disabled in compute_mandelbrot_with_bla and
+        // per-step perturbation takes over; cap the buffer size to match.
+        let bla_cap = needed.min(crate::fractals::BLA_MAX_REF_LEN as u32 + 1);
         let needed_bla = bla_cap * (((bla_cap as f64).log2().ceil() as u32) + 2);
         if needed_bla > self.bla_max_entries {
             self.bla_max_entries = needed_bla;
@@ -774,6 +773,9 @@ impl GpuState {
 
         // Upload reference orbit if using perturbation (cached to avoid recomputation).
         // BLA tree built only for plain Mandelbrot — other variants use single-step perturbation.
+        // Orbit traps are only sampled on single-step iterations, so BLA jumps
+        // would starve the Canopy palette's trap-based highlights — run it per-step.
+        let disable_bla = params.palette == crate::fractals::ColorPalette::Canopy;
         if use_perturb {
             let ft_idx = params.fractal_type.shader_index();
             let is_mandelbrot = params.fractal_type == crate::fractals::FractalType::Mandelbrot;
@@ -842,7 +844,7 @@ impl GpuState {
                 let perturb_gpu = PerturbGpuParams {
                     ref_orbit_len: orbit_len,
                     pixel_step_exp: ps_exp,
-                    bla_num_levels,
+                    bla_num_levels: if disable_bla { 0 } else { bla_num_levels },
                     _pad: 0,
                 };
                 self.queue.write_buffer(
@@ -866,7 +868,7 @@ impl GpuState {
                 let perturb_gpu = PerturbGpuParams {
                     ref_orbit_len: cached.orbit_len,
                     pixel_step_exp: ps_exp,
-                    bla_num_levels: cached.bla_num_levels,
+                    bla_num_levels: if disable_bla { 0 } else { cached.bla_num_levels },
                     _pad: 0,
                 };
                 self.queue.write_buffer(
@@ -1066,8 +1068,10 @@ impl GpuState {
                 pass.set_bind_group(0, &self.nebula_sample_bind_group, &[]);
                 pass.dispatch_workgroups(workgroups, 1, 1);
             }
+            // No poll here: write_buffer is ordered before the following submit,
+            // so dispatches pipeline on the GPU; the histogram readback below
+            // waits for everything. Per-dispatch polls serialize CPU↔GPU.
             self.queue.submit(std::iter::once(encoder.finish()));
-            self.device.poll(wgpu::Maintain::Wait);
         }
 
         // Read back histograms for percentile-based exposure

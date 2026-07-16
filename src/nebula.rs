@@ -3,6 +3,7 @@
 //! and accumulating orbit hit-count histograms across R/G/B channels with different
 //! iteration limits. Progress is communicated via shared atomics.
 
+use crate::fractals::{NebulaFinParams, NebulaGpuParams};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -44,7 +45,7 @@ impl NebulaProgress {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
+    if path == "~" || path.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return format!("{}{}", home, &path[1..]);
         }
@@ -55,35 +56,6 @@ fn expand_tilde(path: &str) -> String {
 /// Align width so bytes_per_row (width * 4) is a multiple of 256.
 fn align_width(w: u32) -> u32 {
     w.div_ceil(64) * 64
-}
-
-/// GPU uniform matching NebulaParams in nebula_sample.wgsl.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct NebulaGpuParams {
-    resolution: [u32; 2],
-    stride: u32,
-    max_iter_r: u32,
-    max_iter_g: u32,
-    max_iter_b: u32,
-    samples_per_thread: u32,
-    dispatch_index: u32,
-    sample_min: [f32; 2],
-    sample_max: [f32; 2],
-    view_min: [f32; 2],
-    view_max: [f32; 2],
-}
-
-/// GPU uniform matching NebFinParams in nebula_finalize.wgsl.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct NebulaFinParams {
-    resolution: [u32; 2],
-    stride: u32,
-    max_r: u32,
-    max_g: u32,
-    max_b: u32,
-    _pad: [u32; 2],
 }
 
 /// Run the full Nebulabrot export on a background thread.
@@ -121,9 +93,17 @@ fn run_nebula_export_inner(
     }))
     .ok_or("No GPU adapter found")?;
 
+    // Raise buffer limits to what the adapter supports — default limits cap
+    // storage bindings at 128 MiB, which large-export histograms exceed.
+    let adapter_limits = adapter.limits();
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("nebula_export"),
+            required_limits: wgpu::Limits {
+                max_buffer_size: adapter_limits.max_buffer_size.min(1 << 31),
+                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+                ..Default::default()
+            },
             ..Default::default()
         },
         None,

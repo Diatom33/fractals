@@ -87,6 +87,9 @@ pub struct FractalApp {
     // Last known display dimensions for aspect ratio correction
     last_display_w: u32,
     last_display_h: u32,
+
+    // When the last undo entry was pushed (for gesture coalescing)
+    last_history_push: Option<std::time::Instant>,
 }
 
 impl FractalApp {
@@ -141,6 +144,7 @@ impl FractalApp {
             cursor_complex: None,
             last_display_w: 0,
             last_display_h: 0,
+            last_history_push: None,
         }
     }
 
@@ -178,6 +182,20 @@ impl FractalApp {
         self.history.push(ViewState::from_params(&self.params));
     }
 
+    /// Push undo state, but coalesce rapid-fire events (scroll notches, key
+    /// repeats) into one entry per gesture so a single Undo walks back the
+    /// whole gesture instead of one notch.
+    fn push_history_coalesced(&mut self) {
+        let now = std::time::Instant::now();
+        let within_gesture = self
+            .last_history_push
+            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(600));
+        if !within_gesture {
+            self.push_history();
+        }
+        self.last_history_push = Some(now);
+    }
+
     /// Mark that we're in an interactive operation — render at SS=1 now,
     /// schedule full-quality re-render after input settles.
     fn mark_interactive(&mut self) {
@@ -209,6 +227,22 @@ impl FractalApp {
             hash ^= self.params.nebula_samples_m.to_bits();
         }
         hash
+    }
+}
+
+/// Map a new zoom-preview UV rect through an existing one, so multiple zoom
+/// gestures stacked before a render completes still preview correctly.
+fn compose_zoom_uv(prev: Option<egui::Rect>, new_uv: egui::Rect) -> egui::Rect {
+    match prev {
+        Some(prev) => {
+            let pw = prev.width();
+            let ph = prev.height();
+            egui::Rect::from_min_max(
+                egui::pos2(prev.min.x + new_uv.min.x * pw, prev.min.y + new_uv.min.y * ph),
+                egui::pos2(prev.min.x + new_uv.max.x * pw, prev.min.y + new_uv.max.y * ph),
+            )
+        }
+        None => new_uv,
     }
 }
 
@@ -495,9 +529,11 @@ impl eframe::App for FractalApp {
 
                         ui.horizontal(|ui| {
                             if ui.button("Reset View").clicked() {
+                                // Push, don't clear — an accidental reset of a
+                                // hand-found deep zoom must be undoable.
+                                self.push_history();
                                 self.params.set_from_default_bounds();
                                 self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
-                                self.history.clear();
                                 self.needs_render = true;
                             }
                             let undo_enabled = !self.history.is_empty();
@@ -1011,8 +1047,11 @@ impl eframe::App for FractalApp {
                         egui::Color32::WHITE,
                     );
 
-                    // Update cursor complex coordinates
+                    // Update cursor complex coordinates. During a drag the
+                    // texture is visually shifted but params haven't moved yet,
+                    // so map the pointer back into the un-shifted view.
                     if let Some(pos) = response.hover_pos() {
+                        let pos = pos - self.drag_pixel_offset;
                         let frac_x =
                             ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0) as f64;
                         let frac_y =
@@ -1050,7 +1089,7 @@ impl FractalApp {
 
                     let factor: f64 = if scroll > 0.0 { 0.85 } else { 1.0 / 0.85 };
 
-                    self.push_history();
+                    self.push_history_coalesced();
                     self.params.ensure_precision();
 
                     let offset_re = (frac_x - 0.5) * 2.0 * self.params.half_range_x;
@@ -1080,26 +1119,8 @@ impl FractalApp {
                         egui::pos2(nx * (1.0 - f), ny * (1.0 - f)),
                         egui::pos2(nx + (1.0 - nx) * f, ny + (1.0 - ny) * f),
                     );
-                    // Compose with existing preview UV if user scrolls multiple
-                    // times before a render completes.
-                    self.zoom_preview_uv = Some(match self.zoom_preview_uv {
-                        Some(prev) => {
-                            // Map new_uv through prev: result.min = prev.min + new_uv.min * prev.size()
-                            let pw = prev.width();
-                            let ph = prev.height();
-                            egui::Rect::from_min_max(
-                                egui::pos2(
-                                    prev.min.x + new_uv.min.x * pw,
-                                    prev.min.y + new_uv.min.y * ph,
-                                ),
-                                egui::pos2(
-                                    prev.min.x + new_uv.max.x * pw,
-                                    prev.min.y + new_uv.max.y * ph,
-                                ),
-                            )
-                        }
-                        None => new_uv,
-                    });
+                    self.zoom_preview_uv =
+                        Some(compose_zoom_uv(self.zoom_preview_uv, new_uv));
 
                     self.mark_interactive();
                     self.needs_render = true;
@@ -1192,9 +1213,10 @@ impl FractalApp {
                 });
 
             if r_pressed {
+                // Push, don't clear — reset must be undoable via Backspace.
+                self.push_history();
                 self.params.set_from_default_bounds();
                 self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
-                self.history.clear();
                 self.needs_render = true;
             }
             if backspace_pressed {
@@ -1208,7 +1230,7 @@ impl FractalApp {
             // Arrow key panning (10% of view per press)
             let pan_frac: f64 = 0.1;
             if left || right || up || down {
-                self.push_history();
+                self.push_history_coalesced();
                 self.params.ensure_precision();
                 self.mark_interactive();
             }
@@ -1248,7 +1270,7 @@ impl FractalApp {
             // +/- keyboard zoom (centered)
             if plus || minus {
                 let factor: f64 = if plus { 0.85 } else { 1.0 / 0.85 };
-                self.push_history();
+                self.push_history_coalesced();
                 self.params.half_range_x *= factor;
                 self.params.half_range_y *= factor;
                 self.params.ensure_precision();
@@ -1259,23 +1281,8 @@ impl FractalApp {
                     egui::pos2(0.5 * (1.0 - f), 0.5 * (1.0 - f)),
                     egui::pos2(0.5 + 0.5 * f, 0.5 + 0.5 * f),
                 );
-                self.zoom_preview_uv = Some(match self.zoom_preview_uv {
-                    Some(prev) => {
-                        let pw = prev.width();
-                        let ph = prev.height();
-                        egui::Rect::from_min_max(
-                            egui::pos2(
-                                prev.min.x + new_uv.min.x * pw,
-                                prev.min.y + new_uv.min.y * ph,
-                            ),
-                            egui::pos2(
-                                prev.min.x + new_uv.max.x * pw,
-                                prev.min.y + new_uv.max.y * ph,
-                            ),
-                        )
-                    }
-                    None => new_uv,
-                });
+                self.zoom_preview_uv =
+                    Some(compose_zoom_uv(self.zoom_preview_uv, new_uv));
 
                 self.mark_interactive();
                 self.needs_render = true;

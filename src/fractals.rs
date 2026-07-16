@@ -431,19 +431,23 @@ impl FractalParams {
         let noise_cell_px = 55.0_f64 * (self.coloring_param as f64).max(0.1);
         let cell_size_x = noise_cell_px * step_x;
         let cell_size_y = noise_cell_px * step_y;
+        // Precision must track zoom depth (center precision), not a fixed 128
+        // bits — otherwise the fractional cell position degrades past ~1e-30
+        // zoom and the noise shimmers while panning.
+        let seed_prec = self.center_re.prec().max(128);
         let noise_seed_x = if cell_size_x > 0.0 {
-            let cell = Float::with_val(128, cell_size_x);
-            let ratio = Float::with_val(128, &self.center_re / cell);
+            let cell = Float::with_val(seed_prec, cell_size_x);
+            let ratio = Float::with_val(seed_prec, &self.center_re / cell);
             let floor_val = ratio.clone().floor();
-            Float::with_val(128, ratio - floor_val).to_f64() as f32
+            Float::with_val(seed_prec, ratio - floor_val).to_f64() as f32
         } else {
             0.0f32
         };
         let noise_seed_y = if cell_size_y > 0.0 {
-            let cell = Float::with_val(128, cell_size_y);
-            let ratio = Float::with_val(128, &self.center_im / cell);
+            let cell = Float::with_val(seed_prec, cell_size_y);
+            let ratio = Float::with_val(seed_prec, &self.center_im / cell);
             let floor_val = ratio.clone().floor();
-            Float::with_val(128, ratio - floor_val).to_f64() as f32
+            Float::with_val(seed_prec, ratio - floor_val).to_f64() as f32
         } else {
             0.0f32
         };
@@ -869,6 +873,13 @@ pub fn compute_variant_reference_orbit(
     PerturbData { orbit, orbit_len, bla: Vec::new(), bla_num_levels: 0 }
 }
 
+/// BLA tree memory is O(ref_len * log2(ref_len) * 48B). At max_iter around
+/// 250k that's ~240 MB; by 1M it's ~1 GB which exceeds our wgpu buffer
+/// cap and would OOM on the CPU side too. Above this threshold, skip BLA
+/// entirely — per-step perturbation still renders, just slower.
+/// GPU-side BLA buffer sizing must use the same cap.
+pub const BLA_MAX_REF_LEN: usize = 250_000;
+
 /// Mandelbrot-only reference orbit + BLA tree. The BLA tree lets the GPU skip
 /// many iterations at once when |δ| stays inside a validity radius.
 ///
@@ -944,11 +955,6 @@ pub fn compute_mandelbrot_with_bla(
     let orbit_len = orbit.len() as u32;
     let ref_len = two_z.len();
 
-    // BLA tree memory is O(ref_len * log2(ref_len) * 48B). At max_iter around
-    // 250k that's ~240 MB; by 1M it's ~1 GB which exceeds our wgpu buffer
-    // cap and would OOM on the CPU side too. Above this threshold, skip BLA
-    // entirely — per-step perturbation still renders, just slower.
-    const BLA_MAX_REF_LEN: usize = 250_000;
     if ref_len > BLA_MAX_REF_LEN {
         return PerturbData {
             orbit,

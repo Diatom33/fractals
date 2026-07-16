@@ -2,7 +2,6 @@
 //! Creates its own wgpu device/queue, independent of the app's GPU state.
 
 use crate::fractals::{self, BlaCoeff, FractalParams, FractalType, GpuParams, PerturbGpuParams};
-use crate::gpu::MAX_MEDIAN_SAMPLES;
 
 pub struct ExportConfig {
     pub width: u32,
@@ -13,7 +12,7 @@ pub struct ExportConfig {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
+    if path == "~" || path.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return format!("{}{}", home, &path[1..]);
         }
@@ -61,6 +60,13 @@ pub fn export_headless(
     let out_pixels = (stride as u64) * (height as u64);
     let ss = if params.palette.uses_neighbor_sampling() { 1 } else { params.supersampling };
     let use_median = params.use_median;
+    let samples = if use_median {
+        fractals::compute_samples_median(ss)
+    } else {
+        fractals::compute_samples(ss)
+    };
+    // Median mode stores every sample's iteration count simultaneously.
+    let iter_slots = if use_median { samples.len() as u64 } else { 1 };
 
     status_callback(format!("Exporting {} at {}x{} ...", params.fractal_type.name(), display_w, height));
 
@@ -71,11 +77,37 @@ pub fn export_headless(
     }))
     .ok_or_else(|| "No GPU adapter found".to_string())?;
 
+    // Match the GUI's raised buffer limits (main.rs) up to what the adapter
+    // supports — default limits cap storage bindings at 128 MiB, which
+    // deep-zoom BLA trees and median iteration buffers exceed.
+    let adapter_limits = adapter.limits();
+    let limits = wgpu::Limits {
+        max_buffer_size: adapter_limits.max_buffer_size.min(1 << 31),
+        max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+        ..Default::default()
+    };
     let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor { label: Some("export"), ..Default::default() },
+        &wgpu::DeviceDescriptor {
+            label: Some("export"),
+            required_limits: limits.clone(),
+            ..Default::default()
+        },
         None,
     ))
     .map_err(|e| format!("Failed to create device: {e}"))?;
+
+    // Median mode holds all sub-pixel samples' iteration counts at once;
+    // refuse clearly rather than dying in wgpu validation at large sizes.
+    let iter_bytes = out_pixels * 4 * iter_slots;
+    if iter_bytes > limits.max_storage_buffer_binding_size as u64 {
+        return Err(format!(
+            "{}x{} with median AA needs a {} MiB iterations buffer (GPU limit {} MiB). \
+             Use the Accumulate AA filter or a smaller resolution.",
+            display_w, height,
+            iter_bytes >> 20,
+            limits.max_storage_buffer_binding_size >> 20,
+        ));
+    }
 
     let escape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None, source: wgpu::ShaderSource::Wgsl(include_str!("shaders/escape.wgsl").into()),
@@ -101,7 +133,7 @@ pub fn export_headless(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
     });
     let iter_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None, size: out_pixels * 4 * if use_median { MAX_MEDIAN_SAMPLES as u64 } else { 1 },
+        label: None, size: iter_bytes,
         usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
     });
     let z_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -142,9 +174,12 @@ pub fn export_headless(
         label: None, size: std::mem::size_of::<PerturbGpuParams>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
     });
-    // BLA tree (Mandelbrot only). Sized to ref_len * num_levels; small fallback for non-Mandelbrot.
-    let bla_num_levels_max = ((params.max_iter as f64 + 1.0).log2().ceil() as u32) + 2;
-    let bla_buf_size = (params.max_iter as u64 + 1) * bla_num_levels_max as u64
+    // BLA tree (Mandelbrot only). Sized to ref_len * num_levels; small fallback
+    // for non-Mandelbrot. Above BLA_MAX_REF_LEN the tree isn't built at all
+    // (compute_mandelbrot_with_bla returns it empty), so cap the allocation too.
+    let bla_cap = (params.max_iter as u64 + 1).min(fractals::BLA_MAX_REF_LEN as u64 + 1);
+    let bla_num_levels_max = ((bla_cap as f64).log2().ceil() as u32) + 2;
+    let bla_buf_size = bla_cap * bla_num_levels_max as u64
         * std::mem::size_of::<BlaCoeff>() as u64;
     let bla_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
@@ -188,6 +223,13 @@ pub fn export_headless(
             );
             queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
             (perturb_data.orbit_len, 0u32)
+        };
+        // Orbit traps only sample on single-step iterations; keep the Canopy
+        // palette per-step so its trap highlights aren't skipped by BLA jumps.
+        let bla_num_levels = if params.palette == fractals::ColorPalette::Canopy {
+            0
+        } else {
+            bla_num_levels
         };
         let pgpu = PerturbGpuParams {
             ref_orbit_len: orbit_len,
@@ -334,11 +376,6 @@ pub fn export_headless(
     let wg_x = display_w.div_ceil(16);
     let wg_y = height.div_ceil(16);
 
-    let samples = if use_median {
-        fractals::compute_samples_median(ss)
-    } else {
-        fractals::compute_samples(ss)
-    };
     let num_samples = samples.len() as u32;
     let params_size = std::mem::size_of::<GpuParams>() as u64;
 
