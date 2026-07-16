@@ -133,7 +133,7 @@ impl GpuState {
         });
         let colorize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("colorize"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/colorize.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(crate::shaders::colorize().into()),
         });
         let finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("finalize"),
@@ -141,7 +141,7 @@ impl GpuState {
         });
         let median_finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("median_finalize"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/median_finalize.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(crate::shaders::median_finalize().into()),
         });
 
         // Uniform buffer

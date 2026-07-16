@@ -133,18 +133,18 @@ impl ExportContext {
             ));
         }
 
-        let shader = |src: &'static str| {
+        let shader = |src: String| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: None,
                 source: wgpu::ShaderSource::Wgsl(src.into()),
             })
         };
-        let escape_shader = shader(include_str!("shaders/escape.wgsl"));
-        let newton_shader = shader(include_str!("shaders/newton.wgsl"));
-        let colorize_shader = shader(include_str!("shaders/colorize.wgsl"));
-        let finalize_shader = shader(include_str!("shaders/finalize.wgsl"));
-        let median_finalize_shader = shader(include_str!("shaders/median_finalize.wgsl"));
-        let perturb_shader = shader(include_str!("shaders/escape_perturb.wgsl"));
+        let escape_shader = shader(include_str!("shaders/escape.wgsl").into());
+        let newton_shader = shader(include_str!("shaders/newton.wgsl").into());
+        let colorize_shader = shader(crate::shaders::colorize());
+        let finalize_shader = shader(include_str!("shaders/finalize.wgsl").into());
+        let median_finalize_shader = shader(crate::shaders::median_finalize());
+        let perturb_shader = shader(include_str!("shaders/escape_perturb.wgsl").into());
 
         let storage_buf = |size: u64, extra: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {

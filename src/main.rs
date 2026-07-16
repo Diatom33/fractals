@@ -3,6 +3,7 @@ mod export;
 mod fractals;
 mod gpu;
 mod nebula;
+mod shaders;
 
 fn main() -> eframe::Result {
     env_logger::init();
