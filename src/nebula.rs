@@ -1,7 +1,7 @@
-/// Nebulabrot export pipeline.
-/// Runs on a background thread with its own wgpu device, sampling random c values
-/// and accumulating orbit hit-count histograms across R/G/B channels with different
-/// iteration limits. Progress is communicated via shared atomics.
+//! Nebulabrot export pipeline.
+//! Runs on a background thread with its own wgpu device, sampling random c values
+//! and accumulating orbit hit-count histograms across R/G/B channels with different
+//! iteration limits. Progress is communicated via shared atomics.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,7 +54,7 @@ fn expand_tilde(path: &str) -> String {
 
 /// Align width so bytes_per_row (width * 4) is a multiple of 256.
 fn align_width(w: u32) -> u32 {
-    (w + 63) / 64 * 64
+    w.div_ceil(64) * 64
 }
 
 /// GPU uniform matching NebulaParams in nebula_sample.wgsl.
@@ -223,9 +223,9 @@ fn run_nebula_export_inner(
     let samples_per_thread = 64u32;
     let samples_per_dispatch = threads_per_dispatch as u64 * samples_per_thread as u64;
     let total_samples = config.num_samples;
-    let num_dispatches = (total_samples + samples_per_dispatch - 1) / samples_per_dispatch;
+    let num_dispatches = total_samples.div_ceil(samples_per_dispatch);
 
-    let workgroups = (threads_per_dispatch + 255) / 256;
+    let workgroups = threads_per_dispatch.div_ceil(256);
 
     // Always sample from the full Mandelbrot escape region
     let sample_min = [-2.5_f32, -1.5];
@@ -350,8 +350,8 @@ fn run_nebula_export_inner(
     };
     queue.write_buffer(&fin_params_buf, 0, bytemuck::bytes_of(&fin_params));
 
-    let wg_x = (config.width + 15) / 16;
-    let wg_y = (height + 15) / 16;
+    let wg_x = config.width.div_ceil(16);
+    let wg_y = height.div_ceil(16);
     let out_readback = create_readback(&device, num_pixels * 4);
 
     {

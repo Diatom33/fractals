@@ -1,96 +1,158 @@
 # Fractal Explorer
 
-GPU-accelerated fractal renderer with an interactive GUI. Built with Rust, wgpu compute shaders (WGSL), and egui.
+GPU-accelerated fractal renderer with an interactive GUI and deep-zoom support. Built with Rust, wgpu compute shaders (WGSL), and egui.
 
 ## Fractal Types
 
 | Type | Formula | Description |
 |------|---------|-------------|
-| **Mandelbrot** | z = z^2 + c | Classic escape-time fractal. c = pixel, z0 = 0 |
-| **Julia** | z = z^2 + c | Julia set. z0 = pixel, c = adjustable constant |
-| **Burning Ship** | z = (\|Re(z)\| + i\|Im(z)\|)^2 + c | Non-analytic variant with absolute value before squaring |
+| **Mandelbrot** | z = z² + c | Classic escape-time fractal. c = pixel, z0 = 0 |
+| **Julia** | z = z² + c | Julia set. z0 = pixel, c = adjustable constant |
+| **Burning Ship** | z = (\|Re(z)\| + i\|Im(z)\|)² + c | Absolute value before squaring |
 | **Multibrot** | z = z^d + c | Generalized Mandelbrot with configurable power d |
-| **Newton** | z = z - a*f(z)/f'(z) | Newton's method for z^n - 1, colored by basin of attraction |
-| **Nova Julia** | z = z - a*f(z)/f'(z) + c | Nova fractal with fixed c, z0 = pixel |
-| **Nova Mandelbrot** | z = z - a*f(z)/f'(z) + c | Nova fractal with c = pixel, z0 = critical point |
+| **Newton** | z = z - a·f(z)/f'(z) | Newton's method for z^n - 1, colored by basin |
+| **Nova Julia** | z = z - a·f(z)/f'(z) + c | Nova fractal with fixed c, z0 = pixel |
+| **Nova Mandelbrot** | z = z - a·f(z)/f'(z) + c | Nova fractal with c = pixel, z0 = critical point |
+| **Tricorn** | z = conj(z)² + c | Anti-holomorphic Mandelbrot |
+| **Celtic** | \|Re(z²)\| + i·Im(z²) + c | Abs on the real part after squaring |
+| **Perpendicular** | Re(z²) - 2i·\|Re(z)\|·Im(z) + c | Perpendicular Mandelbrot variant |
+| **Buffalo** | \|Re(z²)\| - i·\|Im(z²)\| + c | Abs on both parts after squaring |
+| **Nebulabrot** | Buddhabrot RGB | Orbit-density histogram, separate iteration caps per channel |
+
+## Deep Zoom
+
+The view center is stored in arbitrary precision (`rug`/GMP); zoom depth is
+effectively unlimited from the math side:
+
+- **Double-single coordinates** in the standard escape shader (~48-bit mantissa)
+  carry the first ~1e-7 of zoom.
+- Below `pixel_step < 1e-7`, all z²+c variants switch to **perturbation
+  rendering**: a reference orbit is iterated on the CPU at full precision, and
+  the GPU iterates only the per-pixel delta.
+- Plain Mandelbrot additionally builds a **BLA (bivariate linear approximation)
+  tree** so the GPU can skip runs of iterations (disabled above 250k
+  iterations to bound memory; per-step perturbation still works there).
+- Pauldelbrot glitch detection + reference rebasing corrects perturbation
+  artifacts.
+
+## Coloring
+
+Eleven palettes (Classic HSV, Oklab, Smooth Gradient, Monochrome, Thin Film,
+Midnight Aurora, Storm, Canopy, Bioluminescence, STEVE, Inverted Pair), most
+with one or two live parameter sliders. Escape-time fractals use smooth
+iteration coloring; Newton/Nova use root-basin coloring.
+
+Two anti-aliasing modes:
+
+- **Accumulate** — jittered sub-pixel samples averaged in linear color space
+  (6x6 = 36 or 8x8 = 64 samples).
+- **Median** — per-pixel median of 9 jittered samples' iteration values;
+  better at suppressing single-sample fireflies near the boundary.
+
+Palettes that sample neighboring pixels for screen-space gradients (Storm,
+Bioluminescence, STEVE) automatically disable supersampling.
 
 ## Requirements
 
-- Rust 1.75+ (`rustup` recommended)
+- Rust toolchain + C compiler and `m4`/`make` (the `rug` crate builds GMP/MPFR from source)
 - GPU with Vulkan, Metal, or DX12 support
-- Linux: `libwayland-dev` and/or X11 dev libraries
+- Linux: Wayland and/or X11 dev libraries
 
 ## Build & Run
 
 ```bash
-cargo run --release
+cargo run --release   # debug builds are unusably slow for GPU work
 ```
 
 ## CLI Export
 
 ```bash
-# Export a specific fractal type to PNG (1920x1080)
+# Basic export (1920x1080 PNG)
 cargo run --release -- --export output.png --type mandelbrot
-cargo run --release -- --export julia.png --type julia
-cargo run --release -- --export ship.png --type burningship
-cargo run --release -- --export newton.png --type newton
-cargo run --release -- --export nova.png --type novamandelbrot
-```
 
-Available `--type` values: `mandelbrot`, `julia`, `burningship`, `multibrot`, `newton`, `novajulia`, `novamandelbrot`
+# All options
+cargo run --release -- --export out.png \
+    --type mandelbrot \          # see table above; case/space-insensitive
+    --width 3840 --height 2160 \
+    --iter 50000 \               # max iterations (10..=1000000)
+    --ss 3 \                     # supersampling: 1=off, 2=6x6, 3=8x8
+    --palette steve \            # classic|oklab|smooth|mono|thinfilm|aurora|storm|canopy|biolum|steve|ip
+    --median | --no-median \     # AA filter (default: median)
+    --bounds -2.5,1.0,-1.25,1.25 # x_min,x_max,y_min,y_max
+
+# Deep zoom via arbitrary-precision center (use "Copy CLI args" in the GUI)
+cargo run --release -- --export deep.png --type mandelbrot \
+    --center-re "-1.7492046334625463..." --center-im "0.000047..." \
+    --zoom 1e-50 --iter 100000
+
+# Nebulabrot (separate pipeline)
+cargo run --release -- --export nebula.png --type nebulabrot \
+    --width 1920 --height 1080 --nebula-samples 500000000 --nebula-iters 5000,500,50
+
+# Newton / Nova / Multibrot extras
+#   --degree N   polynomial degree for z^n - 1 (2..=8)
+#   --power P    Multibrot exponent (2.0..=8.0)
+```
 
 ## Controls
 
 ### Mouse
-- **Scroll**: Zoom toward cursor
-- **Click + Drag**: Pan
-- **Double-click**: Reset view
+- **Scroll**: Zoom toward cursor (with instant zoom preview)
+- **Click + Drag**: Pan (texture follows during drag, re-renders on release)
+- **Double-click**: Center view on the clicked point (undoable with Backspace)
 
 ### Keyboard
 - **R**: Reset view to defaults
 - **Backspace**: Undo last navigation
 - **Arrow keys**: Pan 10% of view
 - **+/-**: Zoom in/out (centered)
+- **Ctrl+Q**: Quit
 
 ### Side Panel
-- **Fractal Type**: Dropdown selector — switching types resets bounds to appropriate defaults
-- **Max Iterations**: 10–2000 (logarithmic slider)
-- **Power d**: Multibrot exponent (2.0–8.0)
-- **Julia c**: Real and imaginary sliders (-2.0 to 2.0)
-- **Degree n**: Newton/Nova polynomial degree for z^n - 1 (2–8)
-- **Relaxation a**: Nova damping parameter (0.1–2.0)
-- **Export**: Save current view to PNG
-
-Controls are shown/hidden based on the selected fractal type.
+- Fractal type, max iterations (log slider to 1M), supersampling, AA filter,
+  palette + palette parameters, per-type parameters (Julia c, power d,
+  degree n, relaxation a), Nebulabrot iteration/sample controls
+- Precise center coordinates with **Copy CLI args** for reproducing a view
+- PNG export of the current view, plus threaded high-res export (up to
+  15360x8640) and Nebulabrot export with progress/cancel
 
 ## Architecture
 
 ```
 src/
-├── main.rs          # Entry point + CLI export mode
-├── app.rs           # FractalApp: egui UI, mouse/keyboard handling
-├── gpu.rs           # GpuState: wgpu device, pipelines, buffers, textures
-├── fractals.rs      # FractalType enum, FractalParams, GpuParams uniform struct
+├── main.rs          # Entry point, CLI parsing, Nebulabrot CLI export
+├── app.rs           # FractalApp: egui UI, mouse/keyboard, render scheduling
+├── gpu.rs           # GpuState: wgpu pipelines/buffers, interactive render loop
+├── export.rs        # Headless high-res export (own wgpu device, any size)
+├── nebula.rs        # Threaded Nebulabrot export with progress reporting
+├── fractals.rs      # FractalType/params, reference orbits, BLA tree build
 └── shaders/
-    ├── escape.wgsl  # Mandelbrot / Julia / Burning Ship / Multibrot iteration
-    ├── newton.wgsl  # Newton / Nova Julia / Nova Mandelbrot iteration
-    └── colorize.wgsl # Escape-time smooth coloring + root-basin coloring
+    ├── escape.wgsl          # Escape-time iteration (double-single coords)
+    ├── escape_perturb.wgsl  # Perturbation + BLA deep-zoom iteration
+    ├── newton.wgsl          # Newton / Nova iteration
+    ├── colorize.wgsl        # All palettes; accumulation supersampling
+    ├── finalize.wgsl        # Weight-normalize accumulated samples, pack RGBA
+    ├── median_finalize.wgsl # Median-of-samples AA + coloring in one pass
+    ├── nebula_sample.wgsl   # Buddhabrot orbit sampling into RGB histograms
+    └── nebula_finalize.wgsl # Histogram → exposure-normalized RGBA
 ```
 
-### GPU Pipeline
+### GPU Pipeline (escape/Newton fractals)
 
-Two-pass compute shader pipeline:
-
-1. **Iterate** (`escape.wgsl` or `newton.wgsl`): Runs the fractal iteration for every pixel. Outputs smooth iteration count (`f32`) and final z value (`vec2<f32>`) per pixel.
-2. **Colorize** (`colorize.wgsl`): Reads iteration data and produces RGBA pixels. Escape-time fractals use smooth coloring (`iter + 1 - log2(log2(|z|)) / log2(d)`). Newton/Nova fractals use root-basin coloring with golden-angle hue spacing.
-
-The output buffer is copied to a wgpu texture, registered with egui for display.
+Per sub-pixel sample: iterate (escape/perturb/newton shader) → colorize into an
+accumulation buffer. Then a finalize pass (accumulate: divide by total weight;
+median: median of per-sample iteration counts, then color) packs RGBA, which is
+read back to the CPU and uploaded as an egui texture.
 
 ### Key Design Decisions
 
-- **Complex numbers in WGSL**: `vec2<f32>` where x = real, y = imaginary. Custom `cmul`, `csqr`, `cdiv`, `cpow_int` functions.
-- **Newton roots**: Analytically computed as nth roots of unity for z^n - 1 (no GPU readback or clustering needed).
-- **Convergence criterion**: Escape-time checks `|z|^2 > 256`. Newton/Nova checks `|z_new - z|^2 < tol^2` (step size, not residual — critical for Nova where f(z) != 0 at fixed points).
-- **Width alignment**: Buffer widths are rounded up to multiples of 64 pixels to satisfy wgpu's `COPY_BYTES_PER_ROW_ALIGNMENT` (256 bytes).
-- **Render-on-demand**: Only re-renders when parameters change (dirty flag + params hash comparison).
-
+- **Complex numbers in WGSL**: `vec2<f32>` with custom `cmul`/`csqr`/`cdiv`/`cpow_int`.
+- **View state**: arbitrary-precision center (`rug::Float`) + f64 half-ranges;
+  GPU gets Dekker-split f32 hi/lo center + per-pixel step.
+- **Newton roots**: analytic nth roots of unity — no readback or clustering.
+- **Convergence criterion**: escape checks `|z|² > 256`; Newton/Nova check step
+  size `|z_new - z|² < tol²`, not residual (Nova fixed points have f(z) ≠ 0).
+- **Width alignment**: buffer *stride* is rounded up to 64 pixels for wgpu's
+  256-byte row alignment; padding is stripped before display/export.
+- **Render-on-demand**: re-render only on param-hash change; SS=1 during
+  interaction with a deferred full-quality pass 150 ms after input settles.

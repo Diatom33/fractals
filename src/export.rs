@@ -1,5 +1,5 @@
-/// Headless high-resolution export pipeline.
-/// Creates its own wgpu device/queue, independent of the app's GPU state.
+//! Headless high-resolution export pipeline.
+//! Creates its own wgpu device/queue, independent of the app's GPU state.
 
 use crate::fractals::{self, BlaCoeff, FractalParams, FractalType, GpuParams, PerturbGpuParams};
 use crate::gpu::MAX_MEDIAN_SAMPLES;
@@ -22,7 +22,7 @@ fn expand_tilde(path: &str) -> String {
 }
 
 fn align_width(w: u32) -> u32 {
-    (w + 63) / 64 * 64
+    w.div_ceil(64) * 64
 }
 
 pub fn export_headless(
@@ -41,13 +41,16 @@ pub fn export_headless(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Cannot create directory {}: {e}", parent.display()))?;
     }
-    let width = align_width(config.width);
+    // Render at the requested width; buffers use an aligned stride whose
+    // padding columns are stripped before saving.
+    let display_w = config.width;
+    let stride = align_width(display_w);
     let height = config.height;
-    let out_pixels = (width * height) as u64;
+    let out_pixels = (stride as u64) * (height as u64);
     let ss = if params.palette.uses_neighbor_sampling() { 1 } else { params.supersampling };
     let use_median = params.use_median;
 
-    status_callback(format!("Exporting {} at {}x{} ...", params.fractal_type.name(), width, height));
+    status_callback(format!("Exporting {} at {}x{} ...", params.fractal_type.name(), display_w, height));
 
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -114,7 +117,7 @@ pub fn export_headless(
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
     });
 
-    let pixel_step = params.pixel_step_x(width);
+    let pixel_step = params.pixel_step_x(display_w);
     let use_perturb = params.fractal_type.is_escape_time()
         && params.fractal_type != FractalType::Multibrot
         && pixel_step < 1e-7;
@@ -316,13 +319,14 @@ pub fn export_headless(
         entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &out_buf), be!(3, &z_buf), be!(4, &roots_buf), be!(5, &orbit_trap_buf)],
     });
 
-    let wg_x = (width + 15) / 16;
-    let wg_y = (height + 15) / 16;
+    let wg_x = display_w.div_ceil(16);
+    let wg_y = height.div_ceil(16);
 
-    let mut samples = fractals::compute_samples(ss);
-    if use_median && samples.len() > MAX_MEDIAN_SAMPLES as usize {
-        samples.truncate(MAX_MEDIAN_SAMPLES as usize);
-    }
+    let samples = if use_median {
+        fractals::compute_samples_median(ss)
+    } else {
+        fractals::compute_samples(ss)
+    };
     let num_samples = samples.len() as u32;
     let params_size = std::mem::size_of::<GpuParams>() as u64;
 
@@ -331,7 +335,7 @@ pub fn export_headless(
         usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
     });
 
-    let base_gpu_params = params.to_gpu_params(width, height, width);
+    let base_gpu_params = params.to_gpu_params(display_w, height, stride);
     for (i, &(offset_x, offset_y, weight)) in samples.iter().enumerate() {
         let mut gpu_params = base_gpu_params;
         gpu_params.sample_offset = [offset_x, offset_y];
@@ -413,14 +417,27 @@ pub fn export_headless(
     rx.recv().map_err(|e| format!("Map recv failed: {e}"))?.map_err(|e| format!("Map failed: {e}"))?;
 
     let data = slice.get_mapped_range();
-    let img = image::RgbaImage::from_raw(width, height, data.to_vec())
-        .ok_or_else(|| "Failed to create image from pixel data".to_string())?;
+    // Strip stride padding columns
+    let pixels = if stride == display_w {
+        data[..(display_w * height * 4) as usize].to_vec()
+    } else {
+        let mut out = Vec::with_capacity((display_w * height * 4) as usize);
+        for row in 0..height {
+            let start = (row * stride * 4) as usize;
+            let end = start + (display_w * 4) as usize;
+            out.extend_from_slice(&data[start..end]);
+        }
+        out
+    };
     drop(data);
     readback_buf.unmap();
+
+    let img = image::RgbaImage::from_raw(display_w, height, pixels)
+        .ok_or_else(|| "Failed to create image from pixel data".to_string())?;
 
     status_callback("Saving PNG...".to_string());
     img.save(&path).map_err(|e| format!("Save failed: {e}"))?;
 
     let ss_info = if ss > 1 { format!(" ({} samples)", samples.len()) } else { String::new() };
-    Ok(format!("{}x{}{} -> {}", width, height, ss_info, path))
+    Ok(format!("{}x{}{} -> {}", display_w, height, ss_info, path))
 }

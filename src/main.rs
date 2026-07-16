@@ -91,8 +91,8 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
         .and_then(|p| args.get(p + 1))
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(1080);
-    let align = |w: u32| -> u32 { (w + 63) / 64 * 64 };
-    let width = align(width);
+    // Buffers use an aligned stride; padding is stripped before saving.
+    let stride = width.div_ceil(64) * 64;
 
     let total_samples: u64 = args.iter().position(|a| a == "--nebula-samples")
         .and_then(|p| args.get(p + 1))
@@ -132,7 +132,7 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
         None,
     )).expect("Failed to create device");
 
-    let out_pixels = (width as u64) * (height as u64);
+    let out_pixels = (stride as u64) * (height as u64);
     let hist_size = out_pixels * 4;
 
     let mk_buf = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor {
@@ -209,7 +209,7 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
     let threads_per_dispatch = (num_workgroups * workgroup_size) as u64;
     let samples_per_thread = 64u32;
     let samples_per_dispatch = threads_per_dispatch * samples_per_thread as u64;
-    let num_dispatches = ((total_samples + samples_per_dispatch - 1) / samples_per_dispatch) as u32;
+    let num_dispatches = total_samples.div_ceil(samples_per_dispatch) as u32;
 
     let start = std::time::Instant::now();
     let progress_interval = (num_dispatches / 20).max(1);
@@ -225,7 +225,7 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
 
     for dispatch_idx in 0..num_dispatches {
         let nebula_params = NebulaGpuParams {
-            resolution: [width, height], stride: width,
+            resolution: [width, height], stride,
             max_iter_r, max_iter_g, max_iter_b,
             samples_per_thread, dispatch_index: dispatch_idx,
             sample_min, sample_max, view_min, view_max,
@@ -288,7 +288,7 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
     }
 
     let fin_params = NebulaFinParams {
-        resolution: [width, height], stride: width,
+        resolution: [width, height], stride,
         max_r, max_g, max_b, _pad: [0; 2],
     };
     queue.write_buffer(&fin_params_buf, 0, bytemuck::bytes_of(&fin_params));
@@ -298,7 +298,7 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&fin_pipe);
         pass.set_bind_group(0, &fin_bg, &[]);
-        pass.dispatch_workgroups((width + 15) / 16, (height + 15) / 16, 1);
+        pass.dispatch_workgroups(width.div_ceil(16), height.div_ceil(16), 1);
     }
     encoder.copy_buffer_to_buffer(&output_buf, 0, &readback_buf, 0, out_pixels * 4);
     queue.submit(std::iter::once(encoder.finish()));
@@ -310,14 +310,27 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
     device.poll(wgpu::Maintain::Wait);
     rx.recv().unwrap().unwrap();
     let data = slice.get_mapped_range();
-    let img = image::RgbaImage::from_raw(width, height, data.to_vec()).unwrap();
+    let pixels = if stride == width {
+        data[..(width * height * 4) as usize].to_vec()
+    } else {
+        let mut out = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            let start = (row * stride * 4) as usize;
+            let end = start + (width * 4) as usize;
+            out.extend_from_slice(&data[start..end]);
+        }
+        out
+    };
+    drop(data);
+    readback_buf.unmap();
+    let img = image::RgbaImage::from_raw(width, height, pixels).unwrap();
     img.save(path).unwrap();
     println!("Done: {}x{}, {} samples, {:.1}s -> {}", width, height, total_samples, start.elapsed().as_secs_f64(), path);
     Ok(())
 }
 
 fn export_cli(args: &[String], path: &str) -> eframe::Result {
-    use fractals::{BlaCoeff, FractalParams, FractalType, GpuParams, PerturbGpuParams};
+    use fractals::{FractalParams, FractalType};
     use rug::ops::CompleteRound;
 
     let mut params = FractalParams::default();
@@ -439,26 +452,6 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         }
     }
 
-    // Headless wgpu device
-    let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .expect("No GPU adapter found");
-
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("export"),
-            ..Default::default()
-        },
-        None,
-    ))
-    .expect("Failed to create device");
-
-    println!("Exporting {} to {} ...", params.fractal_type.name(), path);
-
-    // Build a minimal pipeline inline for headless rendering
     // Parse --width and --height (default 1920x1080)
     let width = args.iter().position(|a| a == "--width")
         .and_then(|p| args.get(p + 1))
@@ -468,430 +461,20 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         .and_then(|p| args.get(p + 1))
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(1080);
-    let ss = params.supersampling;
-    // Align width to 64-pixel boundary (wgpu row alignment requirement)
-    let align = |w: u32| -> u32 { (w + 63) / 64 * 64 };
-    let width = align(width);
-    let out_pixels = (width * height) as u64;
 
-    let escape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/escape.wgsl").into()),
-    });
-    let newton_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/newton.wgsl").into()),
-    });
-    let colorize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/colorize.wgsl").into()),
-    });
-    let finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/finalize.wgsl").into()),
-    });
-    let median_finalize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/median_finalize.wgsl").into()),
-    });
-
-    let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: std::mem::size_of::<GpuParams>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let use_median = params.use_median;
-    let iter_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_pixels * 4 * if use_median { gpu::MAX_MEDIAN_SAMPLES as u64 } else { 1 },
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    let z_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_pixels * 16, // vec4<f32> per pixel (z.xy, dz_mag, 0)
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    let orbit_trap_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_pixels * 16, // vec4<f32> per pixel (min dist to 4 trap points)
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    let accum_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_pixels * 16, // vec4<f32> per pixel
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let out_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_pixels * 4, // u32 per output pixel
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let roots_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: 8 * 16,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_pixels * 4,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    // Perturbation resources
-    let pixel_step = params.pixel_step_x(width);
-    let use_perturb = params.fractal_type.is_escape_time()
-        && params.fractal_type != FractalType::Multibrot
-        && pixel_step < 1e-7;
-
-    let perturb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/escape_perturb.wgsl").into()),
-    });
-    let ref_orbit_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: (params.max_iter as u64 + 1) * 16,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let perturb_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: std::mem::size_of::<PerturbGpuParams>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let bla_num_levels_max = ((params.max_iter as f64 + 1.0).log2().ceil() as u32) + 2;
-    let bla_buf_size = (params.max_iter as u64 + 1) * bla_num_levels_max as u64
-        * std::mem::size_of::<BlaCoeff>() as u64;
-    let bla_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: bla_buf_size.max(64),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // Decompose pixel_step into mantissa + exponent for extended-range perturbation
-    let step_y = params.pixel_step_y(height);
-    let ps_exp = pixel_step.log2().floor() as i32;
-    let ps_scale = 2.0_f64.powi(ps_exp);
-    let ps_mantissa_x = (pixel_step / ps_scale) as f32;
-    let ps_mantissa_y = (step_y / ps_scale) as f32;
-
-    if use_perturb {
-        let is_mandelbrot = params.fractal_type == FractalType::Mandelbrot;
-        let (orbit_len, bla_num_levels) = if is_mandelbrot {
-            let delta_c_max = params.half_range_x.hypot(params.half_range_y).max(1e-300);
-            let eps = 1.0 / 1024.0;
-            let perturb_data = fractals::compute_mandelbrot_with_bla(
-                &params.center_re, &params.center_im,
-                params.max_iter, pixel_step,
-                delta_c_max, eps,
-            );
-            queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
-            if !perturb_data.bla.is_empty() {
-                queue.write_buffer(&bla_buf, 0, bytemuck::cast_slice(&perturb_data.bla));
-            }
-            (perturb_data.orbit_len, perturb_data.bla_num_levels)
-        } else {
-            let julia_c = if params.fractal_type == FractalType::Julia {
-                Some((params.julia_c[0] as f64, params.julia_c[1] as f64))
-            } else {
-                None
-            };
-            let perturb_data = fractals::compute_variant_reference_orbit(
-                &params.center_re, &params.center_im,
-                params.max_iter, pixel_step,
-                params.fractal_type, julia_c,
-            );
-            queue.write_buffer(&ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
-            (perturb_data.orbit_len, 0u32)
-        };
-        let pgpu = PerturbGpuParams {
-            ref_orbit_len: orbit_len,
-            pixel_step_exp: ps_exp,
-            bla_num_levels,
-            _pad: 0,
-        };
-        queue.write_buffer(&perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));
-        println!("  Perturbation mode: ref orbit {} iters{}, precision for 1e-{:.0}",
-            orbit_len,
-            if bla_num_levels > 0 { format!(", BLA {} levels", bla_num_levels) } else { String::new() },
-            -pixel_step.log10());
-    }
-
-    if params.fractal_type.needs_roots() {
-        let roots = params.compute_roots();
-        let mut flat: Vec<f32> = roots.iter().flat_map(|r| r.iter().copied()).collect();
-        flat.resize(32, 0.0);
-        queue.write_buffer(&roots_buf, 0, bytemuck::cast_slice(&flat));
-    }
-
-    // Build bind group layouts + pipelines
-    let bgl_uniform = |b: u32| wgpu::BindGroupLayoutEntry {
-        binding: b,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
+    let config = export::ExportConfig {
+        width,
+        height,
+        ss: params.supersampling,
+        max_iter: None,
+        path: path.to_string(),
     };
-    let bgl_storage = |b: u32, ro: bool| wgpu::BindGroupLayoutEntry {
-        binding: b,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only: ro },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    };
-    macro_rules! be {
-        ($b:expr, $buf:expr) => {
-            wgpu::BindGroupEntry { binding: $b, resource: $buf.as_entire_binding() }
-        };
-    }
-
-    // Escape pipeline
-    let esc_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, false)],
-    });
-    let esc_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&esc_layout], push_constant_ranges: &[],
-        })),
-        module: &escape_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let esc_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &esc_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &orbit_trap_buf)],
-    });
-
-    // Perturbation pipeline
-    let perturb_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_uniform(4), bgl_storage(5, false), bgl_storage(6, true)],
-    });
-    let perturb_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&perturb_layout], push_constant_ranges: &[],
-        })),
-        module: &perturb_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let perturb_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &perturb_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &ref_orbit_buf), be!(4, &perturb_params_buf), be!(5, &orbit_trap_buf), be!(6, &bla_buf)],
-    });
-
-    // Newton pipeline
-    let new_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, false), bgl_storage(2, false), bgl_storage(3, true), bgl_storage(4, false)],
-    });
-    let new_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&new_layout], push_constant_ranges: &[],
-        })),
-        module: &newton_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let new_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &new_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &roots_buf), be!(4, &orbit_trap_buf)],
-    });
-
-    // Colorize pipeline (now writes to accum buffer instead of output)
-    let col_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, true), bgl_storage(3, false), bgl_storage(4, true), bgl_storage(5, true)],
-    });
-    let col_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&col_layout], push_constant_ranges: &[],
-        })),
-        module: &colorize_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let col_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &col_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &z_buf), be!(3, &accum_buf), be!(4, &roots_buf), be!(5, &orbit_trap_buf)],
-    });
-
-    // Finalize pipeline
-    let fin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false)],
-    });
-    let fin_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&fin_layout], push_constant_ranges: &[],
-        })),
-        module: &finalize_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let fin_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &fin_layout,
-        entries: &[be!(0, &params_buf), be!(1, &accum_buf), be!(2, &out_buf)],
-    });
-
-    // Median finalize pipeline (params, iterations, output, final_z, roots)
-    let med_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[bgl_uniform(0), bgl_storage(1, true), bgl_storage(2, false), bgl_storage(3, true), bgl_storage(4, true), bgl_storage(5, true)],
-    });
-    let med_pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&med_layout], push_constant_ranges: &[],
-        })),
-        module: &median_finalize_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let med_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &med_layout,
-        entries: &[be!(0, &params_buf), be!(1, &iter_buf), be!(2, &out_buf), be!(3, &z_buf), be!(4, &roots_buf), be!(5, &orbit_trap_buf)],
-    });
-
-    let wg_x = (width + 15) / 16;
-    let wg_y = (height + 15) / 16;
-
-    let mut samples = fractals::compute_samples(ss);
-    if use_median && samples.len() > gpu::MAX_MEDIAN_SAMPLES as usize {
-        samples.truncate(gpu::MAX_MEDIAN_SAMPLES as usize);
-    }
-    let num_samples = samples.len() as u32;
-    let params_size = std::mem::size_of::<GpuParams>() as u64;
-
-    // Staging buffer for batched sample params
-    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: (samples.len() as u64 + 1) * params_size,
-        usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // Stage all sample params
-    let base_gpu_params = params.to_gpu_params(width, height, width);
-    for (i, &(offset_x, offset_y, weight)) in samples.iter().enumerate() {
-        let mut gpu_params = base_gpu_params;
-        gpu_params.sample_offset = [offset_x, offset_y];
-        gpu_params.sample_weight = weight;
-        gpu_params.sample_index = if use_median { i as u32 } else { 0 };
-        gpu_params.num_samples = num_samples;
-        if use_perturb {
-            gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
-        }
-        queue.write_buffer(&staging_buf, i as u64 * params_size, bytemuck::bytes_of(&gpu_params));
-    }
-
-    // Single command buffer for all work
-    let mut encoder = device.create_command_encoder(&Default::default());
-    if !use_median {
-        encoder.clear_buffer(&accum_buf, 0, None);
-    }
-
-    for i in 0..samples.len() {
-        encoder.copy_buffer_to_buffer(&staging_buf, i as u64 * params_size, &params_buf, 0, params_size);
-
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            if use_perturb {
-                pass.set_pipeline(&perturb_pipe);
-                pass.set_bind_group(0, &perturb_bg, &[]);
-            } else if params.fractal_type.is_escape_time() {
-                pass.set_pipeline(&esc_pipe);
-                pass.set_bind_group(0, &esc_bg, &[]);
-            } else {
-                pass.set_pipeline(&new_pipe);
-                pass.set_bind_group(0, &new_bg, &[]);
-            }
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
-        }
-
-        // Colorize and accumulate (only in non-median mode)
-        if !use_median {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&col_pipe);
-            pass.set_bind_group(0, &col_bg, &[]);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
+    match export::export_headless(&params, &config, |msg| println!("{msg}")) {
+        Ok(msg) => println!("Done: {msg}"),
+        Err(e) => {
+            eprintln!("Export failed: {e}");
+            std::process::exit(1);
         }
     }
-
-    // Finalize pass
-    {
-        let mut fin_params = base_gpu_params;
-        fin_params.num_samples = num_samples;
-        if !use_median {
-            let total_weight: f32 = samples.iter().map(|s| s.2).sum();
-            fin_params.sample_weight = total_weight;
-        }
-        if use_perturb {
-            fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
-        }
-        let fin_offset = samples.len() as u64 * params_size;
-        queue.write_buffer(&staging_buf, fin_offset, bytemuck::bytes_of(&fin_params));
-        encoder.copy_buffer_to_buffer(&staging_buf, fin_offset, &params_buf, 0, params_size);
-    }
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        if use_median {
-            pass.set_pipeline(&med_pipe);
-            pass.set_bind_group(0, &med_bg, &[]);
-        } else {
-            pass.set_pipeline(&fin_pipe);
-            pass.set_bind_group(0, &fin_bg, &[]);
-        }
-        pass.dispatch_workgroups(wg_x, wg_y, 1);
-    }
-    encoder.copy_buffer_to_buffer(&out_buf, 0, &readback_buf, 0, out_pixels * 4);
-    queue.submit(std::iter::once(encoder.finish()));
-    device.poll(wgpu::Maintain::Wait);
-
-    let slice = readback_buf.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
-    device.poll(wgpu::Maintain::Wait);
-    rx.recv().unwrap().unwrap();
-
-    let data = slice.get_mapped_range();
-    let img = image::RgbaImage::from_raw(width, height, data.to_vec()).unwrap();
-    img.save(path).unwrap();
-    let ss_info = if ss > 1 { format!(" ({} samples)", samples.len()) } else { String::new() };
-    println!("Done: {}x{}{} -> {}", width, height, ss_info, path);
-
     Ok(())
 }

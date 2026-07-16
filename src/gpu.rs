@@ -1,7 +1,7 @@
-/// GPU compute pipeline for fractal rendering via wgpu.
-/// Multi-pass accumulation supersampling: each sub-pixel sample is rendered
-/// at the output resolution with a coordinate offset, colorized, and
-/// accumulated into a float buffer. A final pass normalizes and packs to RGBA.
+//! GPU compute pipeline for fractal rendering via wgpu.
+//! Multi-pass accumulation supersampling: each sub-pixel sample is rendered
+//! at the output resolution with a coordinate offset, colorized, and
+//! accumulated into a float buffer. A final pass normalizes and packs to RGBA.
 
 use crate::fractals::{BlaCoeff, FractalParams, GpuParams, NebulaGpuParams, NebulaFinParams, PerturbGpuParams};
 use rug::Float;
@@ -10,10 +10,24 @@ use rug::Float;
 /// under 128MB binding limit at 1920×1080 (9 * 1920 * 1080 * 4 = 75MB).
 pub const MAX_MEDIAN_SAMPLES: u32 = 9;
 
+/// What the currently uploaded reference orbit (and BLA tree) was computed for.
+/// Reused across frames as long as the view/params it depends on are unchanged.
+struct RefOrbitCache {
+    center_re: Float,
+    center_im: Float,
+    max_iter: u32,
+    orbit_len: u32,
+    fractal_type: u32,
+    julia_c: [f32; 2],
+    half_range_x: f64,
+    half_range_y: f64,
+    bla_num_levels: u32,
+}
+
 /// Align width so bytes_per_row (width * 4) is a multiple of COPY_BYTES_PER_ROW_ALIGNMENT (256).
 pub fn align_width(w: u32) -> u32 {
     let align = 256 / 4; // 64 pixels
-    (w + align - 1) / align * align
+    w.div_ceil(align) * align
 }
 
 /// Holds all wgpu state: device, pipelines, buffers, textures.
@@ -72,8 +86,7 @@ pub struct GpuState {
     // Perturbation state
     pub using_perturbation: bool,
     ref_orbit_max_entries: u32, // current capacity of ref_orbit_buffer
-    // Cache key: (center_re, center_im, max_iter, orbit_len, fractal_type, julia_c, half_range_x, half_range_y, bla_num_levels)
-    cached_ref_orbit: Option<(Float, Float, u32, u32, u32, [f32; 2], f64, f64, u32)>,
+    cached_ref_orbit: Option<RefOrbitCache>,
 
     // Staging buffer for batched sample params (avoids per-sample GPU sync)
     params_staging_buffer: wgpu::Buffer,
@@ -741,8 +754,8 @@ impl GpuState {
         // gradients from adjacent pixels. SS shifts the iteration landscape per sample,
         // moving gradient features to different positions — averaging/median produces noise.
         let ss = if params.palette.uses_neighbor_sampling() { 1 } else { effective_ss };
-        let wg_x = (self.display_width + 15) / 16;
-        let wg_y = (self.height + 15) / 16;
+        let wg_x = self.display_width.div_ceil(16);
+        let wg_y = self.height.div_ceil(16);
 
         // Determine if we should use perturbation (all escape-time z²+c types at deep zoom)
         let pixel_step = params.pixel_step_x(self.display_width);
@@ -766,21 +779,21 @@ impl GpuState {
             let is_mandelbrot = params.fractal_type == crate::fractals::FractalType::Mandelbrot;
             let need_recompute = match &self.cached_ref_orbit {
                 None => true,
-                Some((prev_re, prev_im, prev_iter, _, prev_ft, prev_jc, prev_hrx, prev_hry, prev_bla)) => {
+                Some(prev) => {
                     // Also recompute when dropping from "too large for BLA" (bla_num_levels=0
                     // at >250k iters) back down to a range where BLA would be valid — otherwise
                     // the cached no-BLA state sticks and performance suffers.
                     let recover_bla = is_mandelbrot
-                        && *prev_bla == 0
-                        && *prev_iter > 250_000
+                        && prev.bla_num_levels == 0
+                        && prev.max_iter > 250_000
                         && params.max_iter <= 250_000;
-                    *prev_re != params.center_re
-                        || *prev_im != params.center_im
-                        || *prev_iter < params.max_iter
-                        || *prev_ft != ft_idx
-                        || *prev_jc != params.julia_c
-                        || *prev_hrx != params.half_range_x
-                        || *prev_hry != params.half_range_y
+                    prev.center_re != params.center_re
+                        || prev.center_im != params.center_im
+                        || prev.max_iter < params.max_iter
+                        || prev.fractal_type != ft_idx
+                        || prev.julia_c != params.julia_c
+                        || prev.half_range_x != params.half_range_x
+                        || prev.half_range_y != params.half_range_y
                         || recover_bla
                 }
             };
@@ -837,19 +850,23 @@ impl GpuState {
                     0,
                     bytemuck::bytes_of(&perturb_gpu),
                 );
-                self.cached_ref_orbit = Some((
-                    params.center_re.clone(), params.center_im.clone(),
-                    params.max_iter, orbit_len, ft_idx, params.julia_c,
-                    params.half_range_x, params.half_range_y, bla_num_levels,
-                ));
+                self.cached_ref_orbit = Some(RefOrbitCache {
+                    center_re: params.center_re.clone(),
+                    center_im: params.center_im.clone(),
+                    max_iter: params.max_iter,
+                    orbit_len,
+                    fractal_type: ft_idx,
+                    julia_c: params.julia_c,
+                    half_range_x: params.half_range_x,
+                    half_range_y: params.half_range_y,
+                    bla_num_levels,
+                });
             } else {
                 let cached = self.cached_ref_orbit.as_ref().unwrap();
-                let orbit_len = cached.3;
-                let bla_num_levels = cached.8;
                 let perturb_gpu = PerturbGpuParams {
-                    ref_orbit_len: orbit_len,
+                    ref_orbit_len: cached.orbit_len,
                     pixel_step_exp: ps_exp,
-                    bla_num_levels,
+                    bla_num_levels: cached.bla_num_levels,
                     _pad: 0,
                 };
                 self.queue.write_buffer(
@@ -870,11 +887,12 @@ impl GpuState {
                 .write_buffer(&self.roots_buffer, 0, bytemuck::cast_slice(&padded));
         }
 
-        let mut samples = crate::fractals::compute_samples(ss);
-        // In median mode, clamp to MAX_MEDIAN_SAMPLES (iterations buffer capacity)
-        if use_median && samples.len() > MAX_MEDIAN_SAMPLES as usize {
-            samples.truncate(MAX_MEDIAN_SAMPLES as usize);
-        }
+        // Median mode uses its own 3x3 grid (iterations buffer holds MAX_MEDIAN_SAMPLES)
+        let samples = if use_median {
+            crate::fractals::compute_samples_median(ss)
+        } else {
+            crate::fractals::compute_samples(ss)
+        };
         let num_samples = samples.len() as u32;
         let params_size = std::mem::size_of::<GpuParams>() as u64;
 
@@ -1012,7 +1030,7 @@ impl GpuState {
         let sample_max = [1.0_f32, 1.5];
         let threads_per_dispatch = 65536u32;
         let samples_per_thread = 64u32;
-        let workgroups = (threads_per_dispatch + 255) / 256;
+        let workgroups = threads_per_dispatch.div_ceil(256);
 
         // Clear histograms
         {
@@ -1069,8 +1087,8 @@ impl GpuState {
         };
         self.queue.write_buffer(&self.nebula_fin_params_buffer, 0, bytemuck::bytes_of(&fin_params));
 
-        let wg_x = (self.display_width + 15) / 16;
-        let wg_y = (self.height + 15) / 16;
+        let wg_x = self.display_width.div_ceil(16);
+        let wg_y = self.height.div_ceil(16);
         let buf_size = (self.width as u64) * (self.height as u64) * 4;
 
         let mut encoder = self.device.create_command_encoder(&Default::default());

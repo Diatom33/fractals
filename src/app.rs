@@ -1,4 +1,4 @@
-/// Fractal Explorer egui application.
+//! Fractal Explorer egui application.
 
 use crate::fractals::{FractalParams, FractalType};
 use crate::gpu::GpuState;
@@ -105,7 +105,7 @@ impl FractalApp {
         let gpu = cc
             .wgpu_render_state
             .as_ref()
-            .map(|rs| GpuState::new(rs));
+            .map(GpuState::new);
 
         Self {
             gpu,
@@ -289,7 +289,7 @@ impl eframe::App for FractalApp {
                         ui.add_space(2.0);
                         ui.label("Supersampling:");
                         let ss_label = match self.params.supersampling {
-                            2 => "4x4 (16 samples)",
+                            2 => "6x6 (36 samples)",
                             3 => "8x8 (64 samples)",
                             _ => "Off",
                         };
@@ -306,7 +306,7 @@ impl eframe::App for FractalApp {
                                 ui.selectable_value(
                                     &mut self.params.supersampling,
                                     2,
-                                    "4x4 (16 samples)",
+                                    "6x6 (36 samples)",
                                 );
                                 ui.selectable_value(
                                     &mut self.params.supersampling,
@@ -640,7 +640,7 @@ impl eframe::App for FractalApp {
 
                         ui.add_space(2.0);
                         let hires_ss_label = match self.hires_ss {
-                            2 => "4x4 (16 samples)",
+                            2 => "6x6 (36 samples)",
                             3 => "8x8 (64 samples)",
                             _ => "Off",
                         };
@@ -651,7 +651,7 @@ impl eframe::App for FractalApp {
                                 .selected_text(hires_ss_label)
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut self.hires_ss, 1, "Off");
-                                    ui.selectable_value(&mut self.hires_ss, 2, "4x4 (16 samples)");
+                                    ui.selectable_value(&mut self.hires_ss, 2, "6x6 (36 samples)");
                                     ui.selectable_value(&mut self.hires_ss, 3, "8x8 (64 samples)");
                                 });
                         });
@@ -803,13 +803,12 @@ impl eframe::App for FractalApp {
                                 }
                             }
 
-                            if nebula_running {
-                                if ui.button("Cancel").clicked() {
+                            if nebula_running
+                                && ui.button("Cancel").clicked() {
                                     if let Some(p) = &self.nebula_progress {
                                         p.cancelled.store(true, Ordering::Relaxed);
                                     }
                                 }
-                            }
                         });
 
                         if let Some(progress) = &self.nebula_progress {
@@ -1147,12 +1146,29 @@ impl FractalApp {
             self.drag_pixel_offset = egui::Vec2::ZERO;
         }
 
-        // ── Double-click to reset ─────────────────────────────────────
+        // ── Double-click to center on the clicked point ───────────────
+        // (Reset stays on R / the Reset View button; centering is undoable
+        // via Backspace, unlike the old double-click reset which also wiped
+        // the undo history.)
         if response.double_clicked() {
-            self.params.set_from_default_bounds();
-            self.correct_aspect_ratio(self.last_display_w, self.last_display_h);
-            self.history.clear();
-            self.needs_render = true;
+            if let Some(pos) = response.interact_pointer_pos() {
+                let frac_x = ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0) as f64;
+                let frac_y = ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0) as f64;
+                self.push_history();
+                self.params.ensure_precision();
+                let dx = Float::with_val(
+                    self.params.center_re.prec(),
+                    (frac_x - 0.5) * 2.0 * self.params.half_range_x,
+                );
+                let dy = Float::with_val(
+                    self.params.center_im.prec(),
+                    (frac_y - 0.5) * 2.0 * self.params.half_range_y,
+                );
+                self.params.center_re += dx;
+                self.params.center_im += dy;
+                self.mark_interactive();
+                self.needs_render = true;
+            }
         }
 
         // ── Keyboard shortcuts ────────────────────────────────────────

@@ -1,4 +1,4 @@
-/// Fractal type definitions, parameters, and defaults.
+//! Fractal type definitions, parameters, and defaults.
 
 use rug::{Assign, Float};
 use rug::ops::NegAssign;
@@ -500,7 +500,22 @@ pub fn compute_samples(ss: u32) -> Vec<(f32, f32, f32)> {
         2 => 6,
         _ => 8,
     };
+    jittered_grid(grid_n)
+}
 
+/// Sample positions for median-filter AA. The median shader holds at most
+/// MAX_MEDIAN_SAMPLES (9) per pixel, so use a 3x3 stratified grid covering the
+/// whole pixel — truncating the accumulation grids to their first 9 entries
+/// would bias every sample toward the top rows of the pixel.
+pub fn compute_samples_median(ss: u32) -> Vec<(f32, f32, f32)> {
+    if ss <= 1 {
+        return vec![(0.0, 0.0, 1.0)];
+    }
+    jittered_grid(3)
+}
+
+/// Jittered stratified grid_n × grid_n samples within [-0.5, +0.5], equal weights.
+fn jittered_grid(grid_n: u32) -> Vec<(f32, f32, f32)> {
     let mut samples = Vec::with_capacity((grid_n * grid_n) as usize);
     for sy in 0..grid_n {
         for sx in 0..grid_n {

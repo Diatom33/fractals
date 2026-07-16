@@ -7,20 +7,26 @@
 - **GUI**: egui 0.31 via eframe (wgpu backend, x11 + wayland features)
 - **Build**: `cargo run --release` (always use release — debug is unusably slow for GPU)
 - **Export CLI**: `cargo run --release -- --export file.png --type mandelbrot`
-- **Keyboard**: Ctrl+Q to close, R/Backspace to reset view, scroll to zoom, double-click to center
+- **Keyboard**: Ctrl+Q to close, R to reset view, Backspace to undo navigation, scroll to zoom, double-click to center
 
 ## File Map
 
 | File | Owner | Purpose |
 |------|-------|---------|
-| `src/main.rs` | shared | Entry point, CLI export mode |
+| `src/main.rs` | shared | Entry point, CLI parsing, Nebulabrot CLI export |
 | `src/app.rs` | UI code | `FractalApp` struct, egui layout, mouse/keyboard input |
 | `src/gpu.rs` | GPU code | `GpuState`: wgpu device, pipelines, buffers, render dispatch |
-| `src/fractals.rs` | data | `FractalType` enum (7 types), `FractalParams`, `GpuParams` uniform |
-| `src/shaders/escape.wgsl` | shader | Mandelbrot, Julia, Burning Ship, Multibrot iteration |
+| `src/export.rs` | GPU code | Headless hi-res export pipeline (`export_headless`, own device) |
+| `src/nebula.rs` | GPU code | Threaded Nebulabrot export with progress/cancel |
+| `src/fractals.rs` | data | `FractalType` enum (12 types), `FractalParams`, `GpuParams`, reference orbits + BLA tree |
+| `src/shaders/escape.wgsl` | shader | Escape-time iteration, double-single coordinates |
+| `src/shaders/escape_perturb.wgsl` | shader | Deep-zoom perturbation iteration + BLA + glitch correction |
 | `src/shaders/newton.wgsl` | shader | Newton, Nova Julia, Nova Mandelbrot iteration |
-| `src/shaders/colorize.wgsl` | shader | HSV coloring: escape-time smooth + root-basin modes |
+| `src/shaders/colorize.wgsl` | shader | All 11 palettes: escape-time smooth + root-basin modes |
 | `src/shaders/finalize.wgsl` | shader | Divides accumulated samples by weight, packs to RGBA |
+| `src/shaders/median_finalize.wgsl` | shader | Median-of-samples AA + coloring in one pass |
+| `src/shaders/nebula_sample.wgsl` | shader | Buddhabrot orbit sampling into RGB histograms |
+| `src/shaders/nebula_finalize.wgsl` | shader | Histogram → exposure-normalized RGBA |
 
 
 ## Critical Gotchas
@@ -38,7 +44,7 @@ wgpu's `copy_buffer_to_texture` requires `bytes_per_row` to be a multiple of 256
 `vec2<f32> * vec2<f32>` is component-wise multiplication, NOT scalar broadcast. To multiply a complex number by a scalar, use `scalar * vec` (f32 * vec2), not `vec2(scalar, 0.0) * vec`. The latter zeros the imaginary part.
 
 ### GpuParams Struct Alignment
-`GpuParams` in `fractals.rs` must match the WGSL `Params` struct exactly — same field order, same sizes, padded to 80 bytes. It's `#[repr(C)]` with `bytemuck::Pod + Zeroable`. If you add a field, add it in both places and adjust `_pad`. The Params struct must be updated in ALL FOUR `.wgsl` files (escape, newton, colorize, finalize).
+`GpuParams` in `fractals.rs` must match the WGSL `Params` struct exactly — same field order, same sizes, padded to 128 bytes. It's `#[repr(C)]` with `bytemuck::Pod + Zeroable`. If you add a field, add it in both places and adjust `_pad`. The Params struct must be updated in ALL SIX `.wgsl` files that define it (escape, escape_perturb, newton, colorize, finalize, median_finalize).
 
 ### Texture Registration
 The egui texture must be registered once via `renderer.register_native_texture()` and updated via `renderer.update_egui_texture_from_wgpu_texture()` after each render. The `texture_id` is `None` until first registration and must be re-registered after resize (since the texture is recreated).
