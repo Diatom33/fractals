@@ -36,6 +36,18 @@ pub fn export_headless(
     }
     params.supersampling = config.ss;
 
+    // Aspect-correct for the export dimensions: keep pixels square by expanding
+    // the smaller axis (never cropping), same policy as the interactive view.
+    // Without this, exporting at an aspect ratio different from the current
+    // view stretches the image.
+    if config.width > 0 && config.height > 0 {
+        let scale_x = 2.0 * params.half_range_x / config.width as f64;
+        let scale_y = 2.0 * params.half_range_y / config.height as f64;
+        let scale = scale_x.max(scale_y);
+        params.half_range_x = scale * config.width as f64 / 2.0;
+        params.half_range_y = scale * config.height as f64 / 2.0;
+    }
+
     let path = expand_tilde(&config.path);
     if let Some(parent) = std::path::Path::new(&path).parent() {
         std::fs::create_dir_all(parent)
