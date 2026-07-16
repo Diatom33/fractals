@@ -9,6 +9,11 @@ fn main() -> eframe::Result {
 
     // Quick CLI export mode: --export <file.png> [--type mandelbrot|julia|etc]
     let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--zoom-video") {
+        if let Some(dir) = args.get(pos + 1) {
+            return export_zoom_video(&args, dir);
+        }
+    }
     if let Some(pos) = args.iter().position(|a| a == "--export") {
         if let Some(path) = args.get(pos + 1) {
             if is_nebulabrot(&args) {
@@ -342,7 +347,20 @@ fn export_nebulabrot(args: &[String], path: &str) -> eframe::Result {
     Ok(())
 }
 
-fn export_cli(args: &[String], path: &str) -> eframe::Result {
+/// Parse an integer/float flag like `--width 1920`, falling back to a default.
+fn parse_flag<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> T {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse::<T>().ok())
+        .unwrap_or(default)
+}
+
+/// Parse all fractal/view CLI flags shared by --export and --zoom-video:
+/// --type, --degree, --power, --supersample/--ss, --palette, --median/
+/// --no-median, --iter, --bounds, and the arbitrary-precision deep-zoom trio
+/// --center-re/--center-im/--zoom (--zoom-end also accepted as the extent).
+fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
     use fractals::{FractalParams, FractalType};
     use rug::ops::CompleteRound;
 
@@ -443,9 +461,11 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
 
     // Parse --center-re STR --center-im STR --zoom EXPR for arbitrary-precision deep zoom.
     // Uses rug::Float string parsing so we can hit 1e-100+ depths from CLI.
+    // --zoom-end is accepted as the extent too (zoom-video's target depth),
+    // so precision is sized for the deepest frame.
     let center_re_str = args.iter().position(|a| a == "--center-re").and_then(|p| args.get(p + 1));
     let center_im_str = args.iter().position(|a| a == "--center-im").and_then(|p| args.get(p + 1));
-    let zoom_str = args.iter().position(|a| a == "--zoom").and_then(|p| args.get(p + 1));
+    let zoom_str = args.iter().position(|a| a == "--zoom" || a == "--zoom-end").and_then(|p| args.get(p + 1));
     if let (Some(cre), Some(cim), Some(z)) = (center_re_str, center_im_str, zoom_str) {
         let zoom_extent: f64 = z.parse().unwrap_or(0.0);
         if zoom_extent > 0.0 {
@@ -470,15 +490,13 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         }
     }
 
-    // Parse --width and --height (default 1920x1080)
-    let width = args.iter().position(|a| a == "--width")
-        .and_then(|p| args.get(p + 1))
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(1920);
-    let height = args.iter().position(|a| a == "--height")
-        .and_then(|p| args.get(p + 1))
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(1080);
+    params
+}
+
+fn export_cli(args: &[String], path: &str) -> eframe::Result {
+    let params = parse_fractal_args(args);
+    let width = parse_flag(args, "--width", 1920u32);
+    let height = parse_flag(args, "--height", 1080u32);
 
     let config = export::ExportConfig {
         width,
@@ -492,6 +510,142 @@ fn export_cli(args: &[String], path: &str) -> eframe::Result {
         Err(e) => {
             eprintln!("Export failed: {e}");
             std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+/// Render a zoom video: a sequence of frames zooming into the parsed center,
+/// with the zoom extent interpolated geometrically (constant zoom speed) from
+/// --zoom-start down to --zoom-end. Frames are written as PNGs into `out_dir`
+/// and assembled into zoom.mp4 if ffmpeg is on PATH.
+fn export_zoom_video(args: &[String], out_dir: &str) -> eframe::Result {
+    let mut params = parse_fractal_args(args);
+    let width = parse_flag(args, "--width", 1920u32);
+    let height = parse_flag(args, "--height", 1080u32);
+    let frames: u32 = parse_flag(args, "--frames", 300u32).max(2);
+    let fps: u32 = parse_flag(args, "--fps", 30u32).max(1);
+    let zoom_start: f64 = parse_flag(args, "--zoom-start", 4.0f64);
+    let zoom_end: f64 = {
+        let end = parse_flag(args, "--zoom-end", 0.0f64);
+        if end > 0.0 { end } else { parse_flag(args, "--zoom", 0.0f64) }
+    };
+    if zoom_end <= 0.0 {
+        eprintln!("--zoom-video needs a target depth: pass --zoom-end (or --zoom) with the final x-extent, e.g. --zoom-end 1e-12");
+        std::process::exit(1);
+    }
+    if zoom_end >= zoom_start {
+        eprintln!("--zoom-end ({zoom_end}) must be smaller than --zoom-start ({zoom_start})");
+        std::process::exit(1);
+    }
+
+    let dir = export::expand_tilde(out_dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("Cannot create output directory {dir}: {e}");
+        std::process::exit(1);
+    }
+
+    // Precision must cover the deepest frame.
+    params.half_range_x = zoom_end * 0.5;
+    params.half_range_y = params.half_range_x * (height as f64 / width as f64);
+    params.ensure_precision();
+
+    println!(
+        "Zoom video: {} frames, {}x{}, zoom {:.3e} -> {:.3e}, {} iters, palette {}",
+        frames, width, height, zoom_start, zoom_end, params.max_iter, params.palette.name()
+    );
+
+    let mut ctx = match export::ExportContext::new(width, height, params.max_iter, params.use_median) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("GPU setup failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Geometric zoom schedule: zoom_i = start * ratio^i, constant zoom speed.
+    let ratio = (zoom_end / zoom_start).powf(1.0 / (frames as f64 - 1.0));
+    let zoom_at = |i: u32| zoom_start * ratio.powi(i as i32);
+
+    // If any frame needs perturbation, build the reference orbit ONCE with the
+    // deepest frame's precision and the shallowest perturbed frame's
+    // delta_c_max — BLA radii computed for a larger delta_c_max stay valid
+    // (conservative) for every deeper frame, so no per-frame recompute.
+    let perturbable = params.fractal_type.is_escape_time()
+        && params.fractal_type != fractals::FractalType::Multibrot;
+    let deepest_step = zoom_end / (width as f64 - 1.0).max(1.0);
+    if perturbable && deepest_step < 1e-7 {
+        let shallowest_perturbed_zoom = (0..frames)
+            .map(zoom_at)
+            .find(|z| z / (width as f64 - 1.0).max(1.0) < 1e-7)
+            .unwrap_or(zoom_end);
+        let half_x = shallowest_perturbed_zoom * 0.5;
+        let half_y = half_x * (height as f64 / width as f64);
+        let delta_c_max = half_x.hypot(half_y);
+        if let Err(e) = ctx.ensure_orbit(&params, deepest_step, delta_c_max, &|msg| println!("  {msg}")) {
+            eprintln!("Reference orbit failed: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    let start = std::time::Instant::now();
+    let quiet = |_msg: String| {};
+    for i in 0..frames {
+        let zoom_i = zoom_at(i);
+        params.half_range_x = zoom_i * 0.5;
+        params.half_range_y = params.half_range_x * (height as f64 / width as f64);
+
+        let pixels = match ctx.render_frame(&params, &quiet) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("\nFrame {i} failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        let frame_path = format!("{dir}/frame_{:05}.png", i + 1);
+        let img = image::RgbaImage::from_raw(width, height, pixels)
+            .expect("pixel buffer size mismatch");
+        if let Err(e) = img.save(&frame_path) {
+            eprintln!("\nFailed to save {frame_path}: {e}");
+            std::process::exit(1);
+        }
+
+        let done = i + 1;
+        let elapsed = start.elapsed().as_secs_f64();
+        let eta = elapsed / done as f64 * (frames - done) as f64;
+        print!(
+            "\r  Frame {done}/{frames} (zoom {:.3e}, {:.1}s elapsed, ~{:.0}s left)   ",
+            zoom_i, elapsed, eta
+        );
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+    println!("\nFrames done in {:.1}s -> {dir}/", start.elapsed().as_secs_f64());
+
+    // Assemble with ffmpeg if available; otherwise print the command.
+    // yuv420p needs even dimensions, hence the crop filter.
+    let mp4 = format!("{dir}/zoom.mp4");
+    let ffmpeg_args = [
+        "-y",
+        "-framerate", &fps.to_string(),
+        "-i", &format!("{dir}/frame_%05d.png"),
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "16",
+        "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
+        &mp4,
+    ];
+    match std::process::Command::new("ffmpeg")
+        .args(ffmpeg_args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) if s.success() => println!("Assembled {mp4}"),
+        Ok(s) => eprintln!("ffmpeg exited with {s}; frames are in {dir}/"),
+        Err(_) => {
+            println!("ffmpeg not found — assemble manually with:");
+            println!("  ffmpeg {}", ffmpeg_args.join(" "));
         }
     }
     Ok(())

@@ -89,6 +89,15 @@ cargo run --release -- --export deep.png --type mandelbrot \
 cargo run --release -- --export nebula.png --type nebulabrot \
     --width 1920 --height 1080 --nebula-samples 500000000 --nebula-iters 5000,500,50
 
+# Zoom video: geometric zoom from --zoom-start down to --zoom-end, PNG frames
+# + zoom.mp4 (if ffmpeg is on PATH). Find a spot in the GUI, "Copy CLI args",
+# then add --zoom-video and frame settings. The perturbation reference orbit
+# is computed once and shared by every frame.
+cargo run --release -- --zoom-video out_dir \
+    --type mandelbrot --center-re "..." --center-im "..." \
+    --zoom-end 1e-30 --zoom-start 4.0 --frames 900 --fps 60 \
+    --width 1920 --height 1080 --iter 50000 --palette steve
+
 # Newton / Nova / Multibrot extras
 #   --degree N   polynomial degree for z^n - 1 (2..=8)
 #   --power P    Multibrot exponent (2.0..=8.0)
