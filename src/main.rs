@@ -451,6 +451,28 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
         }
     }
 
+    // Parse --julia-re/--julia-im (Julia / Nova Julia constant) and --relaxation (Nova a).
+    if let Some(v) = args.iter().position(|a| a == "--julia-re").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() { params.julia_c[0] = x; }
+    }
+    if let Some(v) = args.iter().position(|a| a == "--julia-im").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() { params.julia_c[1] = x; }
+    }
+    if let Some(v) = args.iter().position(|a| a == "--relaxation").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() { params.relaxation = x; }
+    }
+
+    // Parse --julia-re/--julia-im (Julia / Nova Julia constant) and --relaxation (Nova a).
+    if let Some(v) = args.iter().position(|a| a == "--julia-re").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() { params.julia_c[0] = x; }
+    }
+    if let Some(v) = args.iter().position(|a| a == "--julia-im").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() { params.julia_c[1] = x; }
+    }
+    if let Some(v) = args.iter().position(|a| a == "--relaxation").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() { params.relaxation = x; }
+    }
+
     // Parse --ref-width: measure screen-space palette effects (glow, gradients)
     // in pixels of an image this wide, so upscaled renders keep their look.
     params.ref_width = parse_flag(args, "--ref-width", 0u32);
