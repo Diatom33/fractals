@@ -1,0 +1,261 @@
+<title>Fractal Wall Picks</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a dark gallery wall; each piece hangs with a small museum placard (type, palette, depth, coordinates) and four rating stamps. */
+:root {
+  --wall: #0e1013;
+  --wall-2: #161a1f;
+  --ink: #ece7dd;
+  --ink-dim: #9a968e;
+  --rule: #2a2f36;
+  --love: #ff7a59;
+  --like: #6fd3c1;
+  --meh: #b9a96a;
+  --no: #6d6f75;
+  --display: "Spectral", Georgia, "Times New Roman", serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+body { background: var(--wall); color: var(--ink); font-family: var(--body); }
+.wrap { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 64px; max-width: 1500px; margin: 0 auto; }
+header { display: flex; flex-wrap: wrap; gap: 16px 32px; align-items: end; justify-content: space-between; border-bottom: 1px solid var(--rule); padding-bottom: 18px; }
+h1 { font-family: var(--display); font-weight: 400; font-size: clamp(28px, 4vw, 44px); margin: 0; letter-spacing: 0.01em; text-wrap: balance; }
+h1 em { color: var(--like); font-style: italic; }
+.lede { color: var(--ink-dim); max-width: 62ch; margin: 8px 0 0; line-height: 1.5; font-size: 14px; }
+.tally { display: flex; gap: 14px; font-family: var(--mono); font-size: 12px; color: var(--ink-dim); flex-wrap: wrap; }
+.tally b { color: var(--ink); font-weight: 500; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 18px 0 6px; }
+.filters button { font: 500 12px var(--body); letter-spacing: 0.06em; text-transform: uppercase; background: transparent; color: var(--ink-dim); border: 1px solid var(--rule); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+.filters button[aria-pressed="true"] { color: var(--wall); background: var(--ink); border-color: var(--ink); }
+.round-title { font-family: var(--display); font-style: italic; font-size: 20px; color: var(--ink-dim); margin: 34px 0 14px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 34px 26px; }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { position: relative; background: var(--wall-2); aspect-ratio: 4 / 3; max-width: 100%; overflow: hidden; cursor: zoom-in; box-shadow: 0 18px 40px -22px #000; }
+.frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.frame .stamp { position: absolute; top: 10px; right: 10px; font: 600 11px var(--body); letter-spacing: 0.08em; text-transform: uppercase; padding: 4px 8px; border-radius: 3px; background: var(--wall); }
+figcaption { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: start; }
+.cap-title { font-family: var(--display); font-size: 17px; }
+.cap-meta { grid-column: 1 / -1; font-family: var(--mono); font-size: 11px; color: var(--ink-dim); line-height: 1.5; overflow-wrap: anywhere; }
+.cap-note { grid-column: 1 / -1; font-size: 13px; color: var(--ink); font-style: italic; font-family: var(--display); }
+.rate { display: flex; gap: 4px; }
+.rate button { font: 500 11px var(--body); letter-spacing: 0.05em; text-transform: uppercase; background: transparent; border: 1px solid var(--rule); color: var(--ink-dim); padding: 5px 8px; border-radius: 3px; cursor: pointer; }
+.rate button:hover { color: var(--ink); border-color: var(--ink-dim); }
+.rate button[aria-pressed="true"][data-r="love"], .stamp.love { background: var(--love); border-color: var(--love); color: var(--wall); }
+.rate button[aria-pressed="true"][data-r="like"], .stamp.like { background: var(--like); border-color: var(--like); color: var(--wall); }
+.rate button[aria-pressed="true"][data-r="meh"], .stamp.meh { background: var(--meh); border-color: var(--meh); color: var(--wall); }
+.rate button[aria-pressed="true"][data-r="no"], .stamp.no { background: var(--no); border-color: var(--no); color: var(--wall); }
+button:focus-visible, textarea:focus-visible { outline: 2px solid var(--like); outline-offset: 2px; }
+.status { font-family: var(--mono); font-size: 12px; color: var(--meh); margin-top: 10px; min-height: 1em; }
+.empty { color: var(--ink-dim); padding: 40px 0; font-family: var(--display); font-style: italic; font-size: 18px; }
+/* Lightbox */
+.lb { position: fixed; inset: 0; background: #07080a; z-index: 20; display: grid; grid-template-rows: 1fr auto; padding: max(12px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); gap: 12px; }
+.lb img { width: 100%; height: 100%; object-fit: contain; min-height: 0; cursor: zoom-out; }
+.lb-bar { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: center; justify-content: space-between; }
+.lb-bar .cap-meta { max-width: 60ch; }
+.lb textarea { font: 14px var(--body); background: var(--wall-2); color: var(--ink); border: 1px solid var(--rule); border-radius: 3px; padding: 6px 8px; width: min(420px, 100%); min-height: 36px; resize: vertical; }
+.lb .keys { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+.lb-nav { display: flex; gap: 6px; }
+.lb-nav button { font: 500 12px var(--body); background: transparent; color: var(--ink); border: 1px solid var(--rule); border-radius: 3px; padding: 6px 10px; cursor: pointer; }
+@media (prefers-reduced-motion: no-preference) { .frame img { transition: transform .4s ease; } .frame:hover img { transform: scale(1.015); } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Fractal <em>wall</em> picks</h1>
+      <p class="lede">Candidates from automated zoom walks, curated by Claude. Rate each one; ratings steer the next round of searching. Open a piece for a full view and rate with keys 1&ndash;4, arrows to move.</p>
+    </div>
+    <div class="tally" id="tally" aria-live="polite"></div>
+  </header>
+  <div class="filters" role="group" aria-label="Filter">
+    <button id="f-all" data-f="all" aria-pressed="true">All</button>
+    <button id="f-unrated" data-f="unrated" aria-pressed="false">Unrated</button>
+    <button id="f-love" data-f="love" aria-pressed="false">Love</button>
+    <button id="f-like" data-f="like" aria-pressed="false">Like</button>
+    <button id="f-meh" data-f="meh" aria-pressed="false">Meh</button>
+    <button id="f-no" data-f="no" aria-pressed="false">No</button>
+  </div>
+  <div class="status" id="status"></div>
+  <main id="rounds"><p class="empty">Loading the wall&hellip;</p></main>
+</div>
+
+<div class="lb" id="lb" hidden>
+  <img id="lb-img" alt="">
+  <div class="lb-bar">
+    <div>
+      <div class="cap-title" id="lb-title"></div>
+      <div class="cap-meta" id="lb-meta"></div>
+    </div>
+    <div class="rate" id="lb-rate"></div>
+    <textarea id="lb-note" placeholder="Notes for Claude (e.g. 'love the spirals, palette too dark')"></textarea>
+    <div class="lb-nav"><button id="lb-prev">&larr; Prev</button><button id="lb-next">Next &rarr;</button><button id="lb-close">Close</button></div>
+    <div class="keys">1 love · 2 like · 3 meh · 4 no · ←/→ move · Esc close</div>
+  </div>
+</div>
+
+<script>
+const R = [["love", "Love"], ["like", "Like"], ["meh", "Meh"], ["no", "No"]];
+let gallery = { rounds: [] };
+let ratings = {};
+let filter = "all";
+let db = null;
+let order = [];
+let lbIndex = -1;
+const $ = (id) => document.getElementById(id);
+
+function sup(n) { return String(n).replace(/[-0-9]/g, (c) => "⁻⁰¹²³⁴⁵⁶⁷⁸⁹"["-0123456789".indexOf(c)]); }
+function depth(z) {
+  const e = Math.floor(Math.log10(z)); const m = z / Math.pow(10, e);
+  return `${m.toFixed(1)}×10${sup(e)}`;
+}
+function coord(it) {
+  const re = Number(it.cre), im = -Number(it.cim);
+  const f = (v) => v.toPrecision(10);
+  return `${f(re)} ${im < 0 ? "−" : "+"} ${f(Math.abs(im))}i`;
+}
+const TYPE = { mandelbrot: "Mandelbrot", julia: "Julia", burningship: "Burning Ship", tricorn: "Tricorn", celtic: "Celtic", perpendicular: "Perpendicular", buffalo: "Buffalo" };
+function title(it) { return it.title || `${TYPE[it.type] || it.type}, ${it.palette}`; }
+function meta(it) {
+  let s = `${it.id} · width ${depth(it.zoom)} · ${coord(it)}`;
+  if (it.julia) s += ` · c = ${it.julia[0].toFixed(6)} ${it.julia[1] < 0 ? "+" : "−"} ${Math.abs(it.julia[1]).toFixed(6)}i`;
+  return s;
+}
+
+function visible(it) {
+  const r = ratings[it.id]?.r;
+  if (filter === "all") return true;
+  if (filter === "unrated") return !r;
+  return r === filter;
+}
+
+function render() {
+  const main = $("rounds");
+  main.textContent = "";
+  order = [];
+  const rounds = [...gallery.rounds].reverse();
+  let shown = 0;
+  for (const rd of rounds) {
+    const items = rd.items.filter(visible);
+    if (!items.length) continue;
+    const h = document.createElement("h2"); h.className = "round-title"; h.textContent = rd.title;
+    const grid = document.createElement("div"); grid.className = "grid";
+    for (const it of items) {
+      order.push(it); shown++;
+      const idx = order.length - 1;
+      const fig = document.createElement("figure");
+      const fr = document.createElement("div"); fr.className = "frame";
+      const img = document.createElement("img"); img.loading = "lazy"; img.src = it.thumb || it.src; img.alt = title(it);
+      fr.append(img);
+      const r = ratings[it.id]?.r;
+      if (r) { const st = document.createElement("span"); st.className = "stamp " + r; st.textContent = r; fr.append(st); }
+      fr.addEventListener("click", () => openLb(idx));
+      const cap = document.createElement("figcaption");
+      const t = document.createElement("div"); t.className = "cap-title"; t.textContent = title(it);
+      cap.append(t, rateButtons(it));
+      const m = document.createElement("div"); m.className = "cap-meta"; m.textContent = meta(it); cap.append(m);
+      if (it.blurb) { const b = document.createElement("div"); b.className = "cap-meta"; b.textContent = it.blurb; cap.append(b); }
+      const note = ratings[it.id]?.note;
+      if (note) { const n = document.createElement("div"); n.className = "cap-note"; n.textContent = "“" + note + "”"; cap.append(n); }
+      fig.append(fr, cap); grid.append(fig);
+    }
+    main.append(h, grid);
+  }
+  if (!shown) { const p = document.createElement("p"); p.className = "empty"; p.textContent = gallery.rounds.length ? "Nothing matches this filter." : "No pieces yet."; main.append(p); }
+  tally();
+}
+
+function rateButtons(it) {
+  const box = document.createElement("div"); box.className = "rate";
+  for (const [k, label] of R) {
+    const b = document.createElement("button"); b.dataset.r = k; b.textContent = label;
+    b.setAttribute("aria-pressed", String(ratings[it.id]?.r === k));
+    b.addEventListener("click", (e) => { e.stopPropagation(); setRating(it, k); });
+    box.append(b);
+  }
+  return box;
+}
+
+function tally() {
+  const all = gallery.rounds.flatMap((r) => r.items);
+  const c = { love: 0, like: 0, meh: 0, no: 0 };
+  for (const it of all) { const r = ratings[it.id]?.r; if (r) c[r]++; }
+  const rated = c.love + c.like + c.meh + c.no;
+  $("tally").innerHTML = "";
+  const parts = [["rated", `${rated}/${all.length}`], ["love", c.love], ["like", c.like], ["meh", c.meh], ["no", c.no]];
+  for (const [k, v] of parts) { const s = document.createElement("span"); s.append(k + " "); const b = document.createElement("b"); b.textContent = v; s.append(b); $("tally").append(s); }
+}
+
+const pending = {};
+async function setRating(it, r) {
+  const cur = ratings[it.id] || {};
+  const next = { ...cur, r: cur.r === r ? null : r, t: Date.now() };
+  ratings[it.id] = next;
+  render(); if (!$("lb").hidden) fillLb();
+  await save(it.id, next);
+}
+async function saveNote(it, note) {
+  const cur = ratings[it.id] || {};
+  if ((cur.note || "") === note) return;
+  const next = { ...cur, note, t: Date.now() };
+  ratings[it.id] = next;
+  await save(it.id, next);
+  render();
+}
+async function save(id, data) {
+  if (!db) { $("status").textContent = "Ratings can't be saved in this view (sign in to claude.ai to rate)."; return; }
+  while (pending[id]) await pending[id];
+  const p = db.doc("ratings/" + id).set({ r: data.r || null, note: data.note || "", t: data.t }).catch((e) => {
+    $("status").textContent = "Couldn't save that rating: " + (e?.message || e?.code || "unknown error") + ". Try again.";
+  });
+  pending[id] = p; await p; delete pending[id];
+}
+
+function openLb(i) { lbIndex = i; $("lb").hidden = false; fillLb(); }
+function fillLb() {
+  const it = order[lbIndex]; if (!it) return;
+  $("lb-img").src = it.src; $("lb-img").alt = title(it);
+  $("lb-title").textContent = title(it); $("lb-meta").textContent = meta(it);
+  const box = $("lb-rate"); box.replaceWith(Object.assign(rateButtons(it), { id: "lb-rate" }));
+  $("lb-note").value = ratings[it.id]?.note || "";
+}
+function closeLb() { commitNote(); $("lb").hidden = true; lbIndex = -1; }
+function move(d) { commitNote(); if (!order.length) return; lbIndex = (lbIndex + d + order.length) % order.length; fillLb(); }
+function commitNote() { const it = order[lbIndex]; if (it) saveNote(it, $("lb-note").value.trim()); }
+$("lb-img").addEventListener("click", closeLb);
+$("lb-close").addEventListener("click", closeLb);
+$("lb-prev").addEventListener("click", () => move(-1));
+$("lb-next").addEventListener("click", () => move(1));
+$("lb-note").addEventListener("blur", commitNote);
+document.addEventListener("keydown", (e) => {
+  if ($("lb").hidden || e.target === $("lb-note")) return;
+  if (e.key === "Escape") closeLb();
+  else if (e.key === "ArrowRight") move(1);
+  else if (e.key === "ArrowLeft") move(-1);
+  else if ("1234".includes(e.key) && e.key.length === 1) setRating(order[lbIndex], R[+e.key - 1][0]);
+});
+document.querySelectorAll(".filters button").forEach((b) => b.addEventListener("click", () => {
+  filter = b.dataset.f;
+  document.querySelectorAll(".filters button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  render();
+}));
+
+fetch("gallery.json").then((r) => r.json()).then((g) => { gallery = g; render(); })
+  .catch(() => { $("rounds").innerHTML = '<p class="empty">The picture list didn\'t load. Reload the page.</p>'; });
+
+(async () => {
+  const timer = setTimeout(() => { $("status").textContent = "Saved ratings can't be reached yet; showing the wall without them."; }, 10000);
+  try {
+    db = await claude.use("db");
+    if (!db) { clearTimeout(timer); $("status").textContent = "Ratings can't be saved in this view (sign in to claude.ai to rate)."; return; }
+    db.collection("ratings").onSnapshot((snap) => {
+      if (!snap.metadata?.fromCache) { clearTimeout(timer); if ($("status").textContent.startsWith("Saved ratings")) $("status").textContent = ""; }
+      const next = {};
+      for (const d of snap.docs) { const v = d.data(); if (v) next[d.id] = v; }
+      ratings = next; render(); if (!$("lb").hidden) { const n = $("lb-note"); const keep = document.activeElement === n ? n.value : null; fillLb(); if (keep !== null) n.value = keep; }
+    }, (e) => { clearTimeout(timer); $("status").textContent = "Lost the connection to saved ratings (" + (e?.code || "error") + "). Reload to reconnect."; });
+  } catch (e) { clearTimeout(timer); $("status").textContent = "Ratings are unavailable in this view."; }
+})();
+</script>
