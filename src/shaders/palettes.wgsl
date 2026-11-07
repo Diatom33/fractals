@@ -176,19 +176,28 @@ fn stripe_value(idx: u32, smooth_iter: f32) -> f32 {
     return mix(aux.y, aux.x, clamp(fract(smooth_iter), 0.0, 1.0));
 }
 
+// Integer output-pixel step for one reference pixel (see FractalParams::ref_width).
+// 1 at native resolution; e.g. 3 for an 11520-wide render with ref_width 3840.
+fn ref_step() -> u32 {
+    return max(u32(round(params.px_scale)), 1u);
+}
+
 // Screen-space gradient of the smooth-iteration landscape at (px, py) within
 // the sample slot starting at sample_base. High magnitude ⇒ near the boundary.
+// Central difference across one reference pixel each side, so the magnitude
+// (per reference pixel) doesn't shrink when rendering above ref resolution.
 fn iter_gradient(px: u32, py: u32, sample_base: u32) -> vec2<f32> {
     let stride_val = params.stride;
+    let k = ref_step();
     var gx: f32 = 0.0;
     var gy: f32 = 0.0;
-    if px > 0u && px < params.resolution.x - 1u {
-        gx = iterations[sample_base + py * stride_val + px + 1u]
-           - iterations[sample_base + py * stride_val + px - 1u];
+    if px >= k && px + k < params.resolution.x {
+        gx = iterations[sample_base + py * stride_val + px + k]
+           - iterations[sample_base + py * stride_val + px - k];
     }
-    if py > 0u && py < params.resolution.y - 1u {
-        gy = iterations[sample_base + (py + 1u) * stride_val + px]
-           - iterations[sample_base + (py - 1u) * stride_val + px];
+    if py >= k && py + k < params.resolution.y {
+        gy = iterations[sample_base + (py + k) * stride_val + px]
+           - iterations[sample_base + (py - k) * stride_val + px];
     }
     return vec2<f32>(gx, gy);
 }
@@ -400,22 +409,32 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32, sample_base: u32) -> vec3<
     var glow_g: f32 = 0.0;
     var glow_b: f32 = 0.0;
 
-    for (var dy: i32 = -4; dy <= 4; dy++) {
-        for (var dx: i32 = -4; dx <= 4; dx++) {
-            let dist_sq = f32(dx * dx + dy * dy);
-            if dist_sq > 20.25 { continue; }  // circular radius 4.5
+    // Kernel: radius 4.5 reference pixels, sampled on the reference grid
+    // (every k-th output pixel). Sparse on purpose: a dense 1/k^2-weighted
+    // kernel keeps the mean glow but averages away its variance, so far fewer
+    // pixels clip to white and upscaled renders turn muddy. On the k-spaced
+    // grid each output pixel is computed exactly like a reference-resolution
+    // pixel on a sub-pixel-shifted grid, so the look matches at any scale.
+    let k = i32(ref_step());
+    for (var oy: i32 = -4; oy <= 4; oy++) {
+        for (var ox: i32 = -4; ox <= 4; ox++) {
+            let dist_sq = f32(ox * ox + oy * oy);
+            if dist_sq > 20.25 { continue; }  // circular radius 4.5 ref px
+            let dx = ox * k;
+            let dy = oy * k;
 
             let nx = i32(px) + dx;
             let ny = i32(py) + dy;
-            if nx < 1 || nx >= i32(w) - 1 || ny < 1 || ny >= i32(h) - 1 { continue; }
+            let g = k;
+            if nx < g || nx >= i32(w) - g || ny < g || ny >= i32(h) - g { continue; }
 
             let n_neighbor = iterations[sample_base + u32(ny) * stride_val + u32(nx)];
             if n_neighbor >= max_iter_f { continue; }
 
-            let ngx = iterations[sample_base + u32(ny) * stride_val + u32(nx + 1)]
-                    - iterations[sample_base + u32(ny) * stride_val + u32(nx - 1)];
-            let ngy = iterations[sample_base + (u32(ny) + 1u) * stride_val + u32(nx)]
-                    - iterations[sample_base + (u32(ny) - 1u) * stride_val + u32(nx)];
+            let ngx = iterations[sample_base + u32(ny) * stride_val + u32(nx + g)]
+                    - iterations[sample_base + u32(ny) * stride_val + u32(nx - g)];
+            let ngy = iterations[sample_base + u32(ny + g) * stride_val + u32(nx)]
+                    - iterations[sample_base + u32(ny - g) * stride_val + u32(nx)];
             let n_emit = sqrt(ngx * ngx + ngy * ngy);
 
             if n_emit < 0.1 { continue; }

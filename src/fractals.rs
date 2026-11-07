@@ -187,6 +187,11 @@ pub struct FractalParams {
     pub coloring_param: f32,  // palette-specific parameter (thin-film k, aurora freq, storm steepness)
     pub coloring_param_2: f32, // second palette-specific parameter (optional, per-palette meaning)
     pub use_median: bool,     // true = median iteration SS, false = Oklab accumulation SS
+    /// Reference width for screen-space palette effects (glow radii, iteration
+    /// gradients). 0 = native: measured in output pixels. Otherwise they're
+    /// measured in pixels of an image this wide, so a 3x render of a 4K view
+    /// (ref_width 3840) keeps the same look instead of a 3x thinner glow.
+    pub ref_width: u32,
     // Nebulabrot-specific params
     pub nebula_iter_r: u32,
     pub nebula_iter_g: u32,
@@ -403,6 +408,7 @@ impl Default for FractalParams {
             coloring_param: ColorPalette::Oklab.default_param(),
             coloring_param_2: ColorPalette::Oklab.default_param_2(),
             use_median: true,
+            ref_width: 0,
             nebula_iter_r: 5000,
             nebula_iter_g: 500,
             nebula_iter_b: 50,
@@ -545,7 +551,12 @@ impl FractalParams {
             noise_seed: [noise_seed_x, noise_seed_y],
             coloring_param_2: self.coloring_param_2,
             pixel_step_log2: step_x.log2() as f32,
-            _pad_128: [0; 2],
+            px_scale: if self.ref_width > 0 {
+                (display_w as f32 / self.ref_width as f32).max(1.0)
+            } else {
+                1.0
+            },
+            _pad_128: [0; 1],
         }
     }
 }
@@ -1157,6 +1168,7 @@ pub struct GpuParams {
     pub noise_seed: [f32; 2],     // 8 bytes  (offset 104) — fBm noise seed from rug center
     pub coloring_param_2: f32,    // 4 bytes  (offset 112) — second palette-specific parameter
     pub pixel_step_log2: f32,     // 4 bytes  (offset 116) — log2 of true pixel step (any zoom depth)
-    pub _pad_128: [u32; 2],       // 8 bytes  (offset 120) — pad to 128
+    pub px_scale: f32,            // 4 bytes  (offset 120) — output px per reference px (screen-space effects)
+    pub _pad_128: [u32; 1],       // 4 bytes  (offset 124) — pad to 128
 }
 // Total: 128 bytes

@@ -30,7 +30,7 @@ struct Params {
     noise_seed: vec2<f32>,
     coloring_param_2: f32,
     pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
-    _pad_128b: u32,
+    px_scale: f32,
     _pad_128c: u32,
 }
 

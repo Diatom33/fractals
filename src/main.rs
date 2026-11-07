@@ -438,6 +438,23 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
         }
     }
 
+    // Parse --palette-param / --palette-param-2: the palette's slider values
+    // (e.g. Bioluminescence murkiness). Must come after --palette, which resets them.
+    if let Some(v) = args.iter().position(|a| a == "--palette-param").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() {
+            params.coloring_param = x;
+        }
+    }
+    if let Some(v) = args.iter().position(|a| a == "--palette-param-2").and_then(|p| args.get(p + 1)) {
+        if let Ok(x) = v.parse::<f32>() {
+            params.coloring_param_2 = x;
+        }
+    }
+
+    // Parse --ref-width: measure screen-space palette effects (glow, gradients)
+    // in pixels of an image this wide, so upscaled renders keep their look.
+    params.ref_width = parse_flag(args, "--ref-width", 0u32);
+
     // Parse --no-median / --median (default: median on)
     if args.iter().any(|a| a == "--no-median") {
         params.use_median = false;
