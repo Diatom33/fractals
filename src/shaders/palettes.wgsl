@@ -87,6 +87,12 @@ fn srgb_to_oklab(srgb: vec3<f32>) -> vec3<f32> {
 // -- fBm noise (Storm lightning masking) ----------------------------------------
 
 // Hash function: maps 2D point to pseudo-random value in [0,1]
+fn pcg_hash(v: u32) -> u32 {
+    let state = v * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
 fn hash2d(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.x, p.y, p.x) * vec3<f32>(0.1031, 0.1030, 0.0973));
     p3 += dot(p3, vec3<f32>(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
@@ -189,17 +195,33 @@ fn ref_step() -> u32 {
 fn iter_gradient(px: u32, py: u32, sample_base: u32) -> vec2<f32> {
     let stride_val = params.stride;
     let k = ref_step();
+    let w = params.resolution.x;
+    let h = params.resolution.y;
+    // Clamp at the image border (one-sided difference, rescaled to the full
+    // 2k span) so edge pixels don't get a zero gradient and a dead border band.
+    let x0 = select(0u, px - k, px >= k);
+    let x1 = min(px + k, w - 1u);
+    let y0 = select(0u, py - k, py >= k);
+    let y1 = min(py + k, h - 1u);
+    let row = sample_base + py * stride_val;
     var gx: f32 = 0.0;
     var gy: f32 = 0.0;
-    if px >= k && px + k < params.resolution.x {
-        gx = iterations[sample_base + py * stride_val + px + k]
-           - iterations[sample_base + py * stride_val + px - k];
+    if x1 > x0 {
+        gx = (iterations[row + x1] - iterations[row + x0]) * f32(2u * k) / f32(x1 - x0);
     }
-    if py >= k && py + k < params.resolution.y {
-        gy = iterations[sample_base + (py + k) * stride_val + px]
-           - iterations[sample_base + (py - k) * stride_val + px];
+    if y1 > y0 {
+        gy = (iterations[sample_base + y1 * stride_val + px]
+            - iterations[sample_base + y0 * stride_val + px]) * f32(2u * k) / f32(y1 - y0);
     }
     return vec2<f32>(gx, gy);
+}
+
+// Mirror an out-of-range coordinate back into [0, n-1] (edge pixel not repeated).
+fn reflect_coord(c: i32, n: i32) -> i32 {
+    var r = c;
+    if r < 0 { r = -r; }
+    if r >= n { r = 2 * (n - 1) - r; }
+    return clamp(r, 0, n - 1);
 }
 
 // -- Escape-time palettes (return sRGB) ---------------------------------------
@@ -409,33 +431,37 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32, sample_base: u32) -> vec3<
     var glow_g: f32 = 0.0;
     var glow_b: f32 = 0.0;
 
-    // Kernel: radius 4.5 reference pixels, sampled on the reference grid
-    // (every k-th output pixel). Sparse on purpose: a dense 1/k^2-weighted
+    // Kernel: radius 4.5 reference pixels, one sample per reference-pixel
+    // cell (k x k output pixels). Sparse on purpose: a dense 1/k^2-weighted
     // kernel keeps the mean glow but averages away its variance, so far fewer
-    // pixels clip to white and upscaled renders turn muddy. On the k-spaced
-    // grid each output pixel is computed exactly like a reference-resolution
-    // pixel on a sub-pixel-shifted grid, so the look matches at any scale.
+    // pixels clip to white and upscaled renders turn muddy. Each sample is
+    // jittered to a random output pixel within its cell (per pixel, per cell):
+    // a fixed k-spaced grid would split the image into k^2 interleaved
+    // sub-images, and a strong emitter would stamp a visible k-periodic dot
+    // lattice. At k = 1 there is no jitter, so native renders are unchanged.
     let k = i32(ref_step());
+    let kf = f32(k);
     for (var oy: i32 = -4; oy <= 4; oy++) {
         for (var ox: i32 = -4; ox <= 4; ox++) {
-            let dist_sq = f32(ox * ox + oy * oy);
-            if dist_sq > 20.25 { continue; }  // circular radius 4.5 ref px
-            let dx = ox * k;
-            let dy = oy * k;
+            if f32(ox * ox + oy * oy) > 20.25 { continue; }  // circular radius 4.5 ref px
+            var dx = ox * k;
+            var dy = oy * k;
+            if k > 1 && (ox != 0 || oy != 0) {
+                let hsh = pcg_hash(px * 9781u + pcg_hash(py * 6271u + u32((oy + 4) * 9 + (ox + 4))));
+                dx += i32(hsh % u32(k)) - k / 2;
+                dy += i32((hsh >> 16u) % u32(k)) - k / 2;
+            }
+            let dist_sq = f32(dx * dx + dy * dy) / (kf * kf);
 
-            let nx = i32(px) + dx;
-            let ny = i32(py) + dy;
-            let g = k;
-            if nx < g || nx >= i32(w) - g || ny < g || ny >= i32(h) - g { continue; }
+            // Off-image neighbors are mirrored back in so edge pixels see a
+            // full kernel instead of a darkened border band.
+            let nx = u32(reflect_coord(i32(px) + dx, i32(w)));
+            let ny = u32(reflect_coord(i32(py) + dy, i32(h)));
 
-            let n_neighbor = iterations[sample_base + u32(ny) * stride_val + u32(nx)];
+            let n_neighbor = iterations[sample_base + ny * stride_val + nx];
             if n_neighbor >= max_iter_f { continue; }
 
-            let ngx = iterations[sample_base + u32(ny) * stride_val + u32(nx + g)]
-                    - iterations[sample_base + u32(ny) * stride_val + u32(nx - g)];
-            let ngy = iterations[sample_base + u32(ny + g) * stride_val + u32(nx)]
-                    - iterations[sample_base + u32(ny - g) * stride_val + u32(nx)];
-            let n_emit = sqrt(ngx * ngx + ngy * ngy);
+            let n_emit = length(iter_gradient(nx, ny, sample_base));
 
             if n_emit < 0.1 { continue; }
 
