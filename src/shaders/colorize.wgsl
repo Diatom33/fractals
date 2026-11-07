@@ -45,6 +45,10 @@ struct Params {
 @group(0) @binding(4) var<storage, read> roots: array<vec2<f32>>;
 @group(0) @binding(5) var<storage, read> orbit_traps: array<vec4<f32>>;
 
+fn iter_at(i: u32) -> f32 {
+    return iterations[i];
+}
+
 //INCLUDE:palettes
 
 // -- Main ---------------------------------------------------------------------

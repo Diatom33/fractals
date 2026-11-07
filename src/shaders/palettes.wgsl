@@ -1,6 +1,10 @@
 // ── Shared palette library ────────────────────────────────────────────────
 // Spliced into colorize.wgsl and median_finalize.wgsl by src/shaders.rs at
-// the //INCLUDE:palettes marker. Everything here may reference the bindings
+// the //INCLUDE:palettes marker. Palettes read smooth-iteration values only
+// through iter_at(i), which each including shader defines (colorize: a direct
+// read; median_finalize: the per-pixel median across sub-samples, so
+// neighbor-reading palettes see one consistent anti-aliased field).
+// Everything here may reference the bindings
 // both shaders declare with identical names: params (uniform), iterations,
 // orbit_traps, roots.
 //
@@ -207,11 +211,11 @@ fn iter_gradient(px: u32, py: u32, sample_base: u32) -> vec2<f32> {
     var gx: f32 = 0.0;
     var gy: f32 = 0.0;
     if x1 > x0 {
-        gx = (iterations[row + x1] - iterations[row + x0]) * f32(2u * k) / f32(x1 - x0);
+        gx = (iter_at(row + x1) - iter_at(row + x0)) * f32(2u * k) / f32(x1 - x0);
     }
     if y1 > y0 {
-        gy = (iterations[sample_base + y1 * stride_val + px]
-            - iterations[sample_base + y0 * stride_val + px]) * f32(2u * k) / f32(y1 - y0);
+        gy = (iter_at(sample_base + y1 * stride_val + px)
+            - iter_at(sample_base + y0 * stride_val + px)) * f32(2u * k) / f32(y1 - y0);
     }
     return vec2<f32>(gx, gy);
 }
@@ -458,7 +462,7 @@ fn palette_biolum(smooth_iter: f32, px: u32, py: u32, sample_base: u32) -> vec3<
             let nx = u32(reflect_coord(i32(px) + dx, i32(w)));
             let ny = u32(reflect_coord(i32(py) + dy, i32(h)));
 
-            let n_neighbor = iterations[sample_base + ny * stride_val + nx];
+            let n_neighbor = iter_at(sample_base + ny * stride_val + nx);
             if n_neighbor >= max_iter_f { continue; }
 
             let n_emit = length(iter_gradient(nx, ny, sample_base));

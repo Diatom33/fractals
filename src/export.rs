@@ -395,8 +395,10 @@ impl ExportContext {
             ));
         }
         let use_median = self.use_median;
-        // Neighbor-sampling palettes can't be multi-sample averaged.
-        let ss = if params.palette.uses_neighbor_sampling() { 1 } else { params.supersampling };
+        // Neighbor-sampling palettes can't be multi-sample *averaged*, but the
+        // median path works: their neighbor reads go through iter_at(), which
+        // returns the per-pixel median field.
+        let ss = if params.palette.uses_neighbor_sampling() && !use_median { 1 } else { params.supersampling };
         let samples = if use_median {
             fractals::compute_samples_median(ss)
         } else {
@@ -637,7 +639,7 @@ pub fn export_headless(
     status_callback("Saving PNG...".to_string());
     img.save(&path).map_err(|e| format!("Save failed: {e}"))?;
 
-    let ss = if params.palette.uses_neighbor_sampling() { 1 } else { params.supersampling };
+    let ss = if params.palette.uses_neighbor_sampling() && !params.use_median { 1 } else { params.supersampling };
     let ss_info = if ss > 1 { " (supersampled)".to_string() } else { String::new() };
     Ok(format!("{}x{}{} -> {}", config.width, config.height, ss_info, path))
 }

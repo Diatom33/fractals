@@ -41,6 +41,33 @@ struct Params {
 @group(0) @binding(4) var<storage, read> roots: array<vec2<f32>>;
 @group(0) @binding(5) var<storage, read> orbit_traps: array<vec4<f32>>;
 
+// Median of a pixel's exterior sub-sample iterations (max_iter if all interior).
+// Palettes call this for neighbor reads (i = pixel index, sample_base is 0 here),
+// so gradients and glow are computed on the same median field as the pixel itself.
+fn iter_at(i: u32) -> f32 {
+    let max_iter = f32(params.max_iter);
+    let n = min(params.num_samples, 16u);
+    let pps = params.stride * params.resolution.y;
+    var v: array<f32, 16>;
+    var c: u32 = 0u;
+    for (var s: u32 = 0u; s < n; s++) {
+        let it = iterations[s * pps + i];
+        if it < max_iter {
+            var j = c;
+            loop {
+                if j == 0u || v[j - 1u] <= it { break; }
+                v[j] = v[j - 1u];
+                j--;
+            }
+            v[j] = it;
+            c++;
+        }
+    }
+    if c == 0u { return max_iter; }
+    if c % 2u == 1u { return v[c / 2u]; }
+    return 0.5 * (v[c / 2u - 1u] + v[c / 2u]);
+}
+
 //INCLUDE:palettes
 
 fn pack_rgba(rgb: vec3<f32>) -> u32 {
