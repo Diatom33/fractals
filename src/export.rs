@@ -383,6 +383,59 @@ impl ExportContext {
     /// Render one frame and return RGBA pixels at display_w x height
     /// (stride padding stripped). The context's use_median mode wins over
     /// params.use_median (buffers are sized for it).
+    /// Dispatch `pipe` over the frame in horizontal bands, one submit each,
+    /// with band height adapted to ~0.75 s of GPU time (`band_wg` carries the
+    /// estimate between calls). A single whole-frame dispatch can run for
+    /// minutes (deep zoom, high max_iter, no BLA, median neighbor palettes)
+    /// and trips the driver watchdog (NVIDIA Xid 109), which silently leaves
+    /// the buffers zeroed. Shaders offset their row by params.row_offset.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_banded(
+        &self,
+        pipe: &wgpu::ComputePipeline,
+        bg: &wgpu::BindGroup,
+        base: GpuParams,
+        wg_x: u32,
+        wg_y: u32,
+        band_wg: &mut u32,
+        label: &str,
+        status: &dyn Fn(String),
+    ) {
+        const BAND_TARGET: f64 = 0.75;
+        let t_start = std::time::Instant::now();
+        let mut last_status = std::time::Instant::now();
+        let mut wg_row = 0u32;
+        while wg_row < wg_y {
+            let n_wg = (*band_wg).clamp(1, wg_y - wg_row);
+            let mut gpu_params = base;
+            gpu_params.row_offset = wg_row * 16;
+            self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&gpu_params));
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(pipe);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(wg_x, n_wg, 1);
+            }
+            let t = std::time::Instant::now();
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.device.poll(wgpu::Maintain::Wait);
+            let dt = t.elapsed().as_secs_f64().max(1e-4);
+            let scaled = (n_wg as f64 * BAND_TARGET / dt).clamp(1.0, n_wg as f64 * 2.0);
+            *band_wg = (scaled as u32).clamp(1, wg_y);
+            wg_row += n_wg;
+            if last_status.elapsed().as_secs_f64() > 2.0 {
+                let frac = wg_row as f64 / wg_y as f64;
+                let el = t_start.elapsed().as_secs_f64();
+                status(format!(
+                    "{label}: {:.0}% ({:.0}s elapsed, ~{:.0}s left)",
+                    frac * 100.0, el, el / frac.max(1e-6) * (1.0 - frac)
+                ));
+                last_status = std::time::Instant::now();
+            }
+        }
+    }
+
     pub fn render_frame(
         &mut self,
         params: &FractalParams,
@@ -468,57 +521,18 @@ impl ExportContext {
             self.queue.submit(std::iter::once(encoder.finish()));
         }
 
-        // The iterate pass is dispatched in horizontal bands, one submit each,
-        // sized adaptively to ~BAND_TARGET of GPU time. A single whole-frame
-        // dispatch can run for minutes (deep zoom, high max_iter, no BLA) and
-        // trips the driver's watchdog (NVIDIA Xid 109), which silently leaves
-        // the output buffers zeroed.
-        const BAND_TARGET: f64 = 0.75;
-        let total_rows = (self.height as u64) * samples.len() as u64;
-        let mut rows_done: u64 = 0;
-        let mut band_wg: u32 = 4; // 64 rows to start
-        let t_start = std::time::Instant::now();
-        let mut last_status = std::time::Instant::now();
-        for i in 0..samples.len() {
-            let mut wg_row = 0u32;
-            while wg_row < wg_y {
-                let n_wg = band_wg.min(wg_y - wg_row);
-                let mut gpu_params = sample_params(i);
-                gpu_params.row_offset = wg_row * 16;
-                self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&gpu_params));
-                let mut encoder = self.device.create_command_encoder(&Default::default());
-                {
-                    let mut pass = encoder.begin_compute_pass(&Default::default());
-                    if use_perturb {
-                        pass.set_pipeline(&self.perturb_pipe);
-                        pass.set_bind_group(0, &self.perturb_bg, &[]);
-                    } else if params.fractal_type.is_escape_time() {
-                        pass.set_pipeline(&self.esc_pipe);
-                        pass.set_bind_group(0, &self.esc_bg, &[]);
-                    } else {
-                        pass.set_pipeline(&self.new_pipe);
-                        pass.set_bind_group(0, &self.new_bg, &[]);
-                    }
-                    pass.dispatch_workgroups(wg_x, n_wg, 1);
-                }
-                let t = std::time::Instant::now();
-                self.queue.submit(std::iter::once(encoder.finish()));
-                self.device.poll(wgpu::Maintain::Wait);
-                let dt = t.elapsed().as_secs_f64().max(1e-4);
-                let scaled = (n_wg as f64 * BAND_TARGET / dt).clamp(1.0, (n_wg as f64) * 2.0);
-                band_wg = (scaled as u32).clamp(1, wg_y);
-                wg_row += n_wg;
-                rows_done += (n_wg as u64 * 16).min(self.height as u64);
-                if last_status.elapsed().as_secs_f64() > 2.0 {
-                    let frac = rows_done as f64 / total_rows as f64;
-                    let el = t_start.elapsed().as_secs_f64();
-                    status(format!(
-                        "Iterating: {:.0}% ({:.0}s elapsed, ~{:.0}s left)",
-                        frac * 100.0, el, el / frac.max(1e-6) * (1.0 - frac)
-                    ));
-                    last_status = std::time::Instant::now();
-                }
-            }
+        let n_samp = samples.len();
+        let iter_pipe = if use_perturb {
+            (&self.perturb_pipe, &self.perturb_bg)
+        } else if params.fractal_type.is_escape_time() {
+            (&self.esc_pipe, &self.esc_bg)
+        } else {
+            (&self.new_pipe, &self.new_bg)
+        };
+        let mut band_wg: u32 = 4;
+        for i in 0..n_samp {
+            let label = if n_samp > 1 { format!("Iterating sample {}/{}", i + 1, n_samp) } else { "Iterating".to_string() };
+            self.dispatch_banded(iter_pipe.0, iter_pipe.1, sample_params(i), wg_x, wg_y, &mut band_wg, &label, status);
             if !use_median {
                 let gpu_params = sample_params(i);
                 self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&gpu_params));
@@ -543,19 +557,13 @@ impl ExportContext {
         if use_perturb {
             fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
         }
-        self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&fin_params));
+        // Median finalize with a neighbor-reading palette takes a per-sample
+        // median for every neighbor read, so it can be as slow as iterating:
+        // band it too.
+        let (fin_pipe, fin_bg) = if use_median { (&self.med_pipe, &self.med_bg) } else { (&self.fin_pipe, &self.fin_bg) };
+        let mut fin_band_wg: u32 = 4;
+        self.dispatch_banded(fin_pipe, fin_bg, fin_params, wg_x, wg_y, &mut fin_band_wg, "Coloring", status);
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            if use_median {
-                pass.set_pipeline(&self.med_pipe);
-                pass.set_bind_group(0, &self.med_bg, &[]);
-            } else {
-                pass.set_pipeline(&self.fin_pipe);
-                pass.set_bind_group(0, &self.fin_bg, &[]);
-            }
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
-        }
         let out_bytes = (self.stride as u64) * (self.height as u64) * 4;
         encoder.copy_buffer_to_buffer(&self.out_buf, 0, &self.readback_buf, 0, out_bytes);
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -607,6 +615,65 @@ pub fn aspect_correct(params: &mut FractalParams, width: u32, height: u32) {
     }
 }
 
+/// Overlap above and below each strip. Neighbor-reading palettes look at most
+/// ~6 px away (biolum: 4.5 px kernel + 1 px gradient, x ref scale), so 16 px
+/// keeps every kept row's neighborhood inside its own strip.
+const STRIP_MARGIN: u32 = 16;
+
+/// Render the frame, splitting it into horizontal strips when its buffers
+/// would exceed the GPU's 2 GiB per-buffer limit (e.g. 9-sample median at
+/// poster sizes). Each strip is its own view whose center and half-height are
+/// derived from the full frame's pixel step, so strip pixels sample exactly
+/// the full frame's points; only each strip's interior rows are kept.
+/// (Palettes that seed noise from the view center, e.g. Storm, would show
+/// seams; the neighbor kernels themselves are seamless.)
+/// FRACTAL_MAX_STRIP_ROWS overrides the row budget, for testing strip seams.
+fn render_in_strips(
+    params: &FractalParams,
+    width: u32,
+    height: u32,
+    status: &dyn Fn(String),
+) -> Result<Vec<u8>, String> {
+    let slots = if params.use_median { MAX_MEDIAN_SAMPLES as u64 } else { 1 };
+    let stride = crate::gpu::align_width(width) as u64;
+    // Largest per-pixel buffer: iterations (4 B x slots) or a vec4<f32> buffer (16 B).
+    let bytes_per_row = stride * (4 * slots).max(16);
+    let mut max_rows = ((1900u64 << 20) / bytes_per_row).min(u32::MAX as u64) as u32;
+    if let Some(r) = std::env::var("FRACTAL_MAX_STRIP_ROWS").ok().and_then(|v| v.parse::<u32>().ok()) {
+        max_rows = max_rows.min(r.max(2 * STRIP_MARGIN + 16));
+    }
+    if height <= max_rows {
+        let mut ctx = ExportContext::new(width, height, params.max_iter, params.use_median)?;
+        return ctx.render_frame(params, status);
+    }
+
+    let core_max = max_rows - 2 * STRIP_MARGIN;
+    let n = height.div_ceil(core_max);
+    let core = height.div_ceil(n);
+    let hs = (core + 2 * STRIP_MARGIN).min(height);
+    let step_y = params.pixel_step_y(height);
+    let mut ctx = ExportContext::new(width, hs, params.max_iter, params.use_median)?;
+    let row_bytes = (width * 4) as usize;
+    let mut out = vec![0u8; row_bytes * height as usize];
+    for s in 0..n {
+        let r0 = s * core;
+        let r1 = ((s + 1) * core).min(height);
+        let top = r0.saturating_sub(STRIP_MARGIN).min(height - hs);
+        let mut sp = params.clone();
+        let off_rows = (top as f64 + (hs - 1) as f64 / 2.0) - (height - 1) as f64 / 2.0;
+        sp.center_im += off_rows * step_y;
+        sp.half_range_y = step_y * (hs - 1) as f64 / 2.0;
+        status(format!("Strip {}/{} (rows {}..{})", s + 1, n, r0, r1));
+        let strip = ctx.render_frame(&sp, &|msg| status(format!("Strip {}/{}: {msg}", s + 1, n)))?;
+        for r in r0..r1 {
+            let src = (r - top) as usize * row_bytes;
+            let dst = r as usize * row_bytes;
+            out[dst..dst + row_bytes].copy_from_slice(&strip[src..src + row_bytes]);
+        }
+    }
+    Ok(out)
+}
+
 pub fn export_headless(
     params: &FractalParams,
     config: &ExportConfig,
@@ -630,8 +697,7 @@ pub fn export_headless(
         params.fractal_type.name(), config.width, config.height
     ));
 
-    let mut ctx = ExportContext::new(config.width, config.height, params.max_iter, params.use_median)?;
-    let pixels = ctx.render_frame(&params, &|msg| status_callback(msg))?;
+    let pixels = render_in_strips(&params, config.width, config.height, &|msg| status_callback(msg))?;
 
     let img = image::RgbaImage::from_raw(config.width, config.height, pixels)
         .ok_or_else(|| "Failed to create image from pixel data".to_string())?;

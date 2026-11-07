@@ -6,7 +6,7 @@
 - **GPU**: wgpu 24 compute shaders in WGSL
 - **GUI**: egui 0.31 via eframe (wgpu backend, x11 + wayland features)
 - **Build**: `cargo run --release` (always use release — debug is unusably slow for GPU)
-- **Export CLI**: `cargo run --release -- --export file.png --type mandelbrot` (`--palette-param X` sets the palette slider, e.g. biolum murkiness; `--ref-width 3840` keeps screen-space palettes like biolum looking the same when rendering above that width; `--no-bla` disables BLA, whose approximation error visibly distorts the set; use it for final exports)
+- **Export CLI**: `cargo run --release -- --export file.png --type mandelbrot` (`--palette-param X` sets the palette slider, e.g. biolum murkiness; `--ref-width 3840` keeps screen-space palettes like biolum looking the same when rendering above that width; `--no-bla` disables BLA, whose approximation error visibly distorts the set; use it for final exports. Exports too big for 2 GiB buffers, e.g. 9-sample median at poster size, render automatically in seamless strips)
 - **Zoom video CLI**: `cargo run --release -- --zoom-video dir --center-re "..." --center-im "..." --zoom-end 1e-30 --frames 900` (PNG frames + zoom.mp4 via ffmpeg if present)
 - **Keyboard**: Ctrl+Q to close, R to reset view, Backspace to undo navigation, scroll to zoom, double-click to center
 

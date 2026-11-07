@@ -85,7 +85,7 @@ const MAX_SAMPLES: u32 = 64u;
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
-    let y = gid.y;
+    let y = gid.y + params.row_offset;
     let w = params.resolution.x;
     let h = params.resolution.y;
     if x >= w || y >= h { return; }
