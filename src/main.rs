@@ -455,6 +455,9 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
     // in pixels of an image this wide, so upscaled renders keep their look.
     params.ref_width = parse_flag(args, "--ref-width", 0u32);
 
+    // Parse --no-bla: exact perturbation, no BLA skipping (slower, undistorted).
+    params.no_bla = args.iter().any(|a| a == "--no-bla");
+
     // Parse --no-median / --median (default: median on)
     if args.iter().any(|a| a == "--no-median") {
         params.use_median = false;

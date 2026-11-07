@@ -28,7 +28,7 @@ struct Params {
     coloring_param_2: f32,
     pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
     px_scale: f32,
-    _pad_128c: u32,
+    row_offset: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -187,7 +187,7 @@ fn stripe_k() -> f32 {
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
-    let y = gid.y;
+    let y = gid.y + params.row_offset;
     let w = params.resolution.x;
     let h = params.resolution.y;
     if x >= w || y >= h { return; }

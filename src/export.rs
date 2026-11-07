@@ -71,7 +71,6 @@ pub struct ExportContext {
     med_bg: wgpu::BindGroup,
 
     params_buf: wgpu::Buffer,
-    staging_buf: wgpu::Buffer,
     accum_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
     roots_buf: wgpu::Buffer,
@@ -184,13 +183,6 @@ impl ExportContext {
         let bla_buf_size = bla_cap * bla_num_levels_max as u64 * std::mem::size_of::<BlaCoeff>() as u64;
         let bla_buf = storage_buf(bla_buf_size.max(64), wgpu::BufferUsages::COPY_DST);
 
-        // Staging for per-sample GpuParams (64 accumulate samples max, +1 finalize)
-        let params_size = std::mem::size_of::<GpuParams>() as u64;
-        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None, size: 65 * params_size,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
-        });
-
         let bgl_uniform = |b: u32| wgpu::BindGroupLayoutEntry {
             binding: b, visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
@@ -298,7 +290,6 @@ impl ExportContext {
             fin_pipe, fin_bg,
             med_pipe, med_bg,
             params_buf,
-            staging_buf,
             accum_buf,
             out_buf,
             roots_buf,
@@ -430,7 +421,7 @@ impl ExportContext {
             // Orbit traps / stripes / interior fields only sample on
             // single-step iterations; keep those palettes per-step so BLA
             // jumps don't starve their accumulators.
-            let bla_num_levels = if params.palette.needs_per_step_orbit() {
+            let bla_num_levels = if params.palette.needs_per_step_orbit() || params.no_bla {
                 0
             } else {
                 cache.bla_num_levels
@@ -452,9 +443,9 @@ impl ExportContext {
         }
 
         let num_samples = samples.len() as u32;
-        let params_size = std::mem::size_of::<GpuParams>() as u64;
         let base_gpu_params = params.to_gpu_params(self.display_w, self.height, self.stride);
-        for (i, &(offset_x, offset_y, weight)) in samples.iter().enumerate() {
+        let sample_params = |i: usize| {
+            let (offset_x, offset_y, weight) = samples[i];
             let mut gpu_params = base_gpu_params;
             gpu_params.sample_offset = [offset_x, offset_y];
             gpu_params.sample_weight = weight;
@@ -463,55 +454,95 @@ impl ExportContext {
             if use_perturb {
                 gpu_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
             }
-            self.queue.write_buffer(&self.staging_buf, i as u64 * params_size, bytemuck::bytes_of(&gpu_params));
-        }
+            gpu_params
+        };
 
         let wg_x = self.display_w.div_ceil(16);
         let wg_y = self.height.div_ceil(16);
 
-        let mut encoder = self.device.create_command_encoder(&Default::default());
         if !use_median {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
             encoder.clear_buffer(&self.accum_buf, 0, None);
+            self.queue.submit(std::iter::once(encoder.finish()));
         }
 
+        // The iterate pass is dispatched in horizontal bands, one submit each,
+        // sized adaptively to ~BAND_TARGET of GPU time. A single whole-frame
+        // dispatch can run for minutes (deep zoom, high max_iter, no BLA) and
+        // trips the driver's watchdog (NVIDIA Xid 109), which silently leaves
+        // the output buffers zeroed.
+        const BAND_TARGET: f64 = 0.75;
+        let total_rows = (self.height as u64) * samples.len() as u64;
+        let mut rows_done: u64 = 0;
+        let mut band_wg: u32 = 4; // 64 rows to start
+        let t_start = std::time::Instant::now();
+        let mut last_status = std::time::Instant::now();
         for i in 0..samples.len() {
-            encoder.copy_buffer_to_buffer(&self.staging_buf, i as u64 * params_size, &self.params_buf, 0, params_size);
-            {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
-                if use_perturb {
-                    pass.set_pipeline(&self.perturb_pipe);
-                    pass.set_bind_group(0, &self.perturb_bg, &[]);
-                } else if params.fractal_type.is_escape_time() {
-                    pass.set_pipeline(&self.esc_pipe);
-                    pass.set_bind_group(0, &self.esc_bg, &[]);
-                } else {
-                    pass.set_pipeline(&self.new_pipe);
-                    pass.set_bind_group(0, &self.new_bg, &[]);
+            let mut wg_row = 0u32;
+            while wg_row < wg_y {
+                let n_wg = band_wg.min(wg_y - wg_row);
+                let mut gpu_params = sample_params(i);
+                gpu_params.row_offset = wg_row * 16;
+                self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&gpu_params));
+                let mut encoder = self.device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = encoder.begin_compute_pass(&Default::default());
+                    if use_perturb {
+                        pass.set_pipeline(&self.perturb_pipe);
+                        pass.set_bind_group(0, &self.perturb_bg, &[]);
+                    } else if params.fractal_type.is_escape_time() {
+                        pass.set_pipeline(&self.esc_pipe);
+                        pass.set_bind_group(0, &self.esc_bg, &[]);
+                    } else {
+                        pass.set_pipeline(&self.new_pipe);
+                        pass.set_bind_group(0, &self.new_bg, &[]);
+                    }
+                    pass.dispatch_workgroups(wg_x, n_wg, 1);
                 }
-                pass.dispatch_workgroups(wg_x, wg_y, 1);
+                let t = std::time::Instant::now();
+                self.queue.submit(std::iter::once(encoder.finish()));
+                self.device.poll(wgpu::Maintain::Wait);
+                let dt = t.elapsed().as_secs_f64().max(1e-4);
+                let scaled = (n_wg as f64 * BAND_TARGET / dt).clamp(1.0, (n_wg as f64) * 2.0);
+                band_wg = (scaled as u32).clamp(1, wg_y);
+                wg_row += n_wg;
+                rows_done += (n_wg as u64 * 16).min(self.height as u64);
+                if last_status.elapsed().as_secs_f64() > 2.0 {
+                    let frac = rows_done as f64 / total_rows as f64;
+                    let el = t_start.elapsed().as_secs_f64();
+                    status(format!(
+                        "Iterating: {:.0}% ({:.0}s elapsed, ~{:.0}s left)",
+                        frac * 100.0, el, el / frac.max(1e-6) * (1.0 - frac)
+                    ));
+                    last_status = std::time::Instant::now();
+                }
             }
             if !use_median {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.col_pipe);
-                pass.set_bind_group(0, &self.col_bg, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, 1);
+                let gpu_params = sample_params(i);
+                self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&gpu_params));
+                let mut encoder = self.device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = encoder.begin_compute_pass(&Default::default());
+                    pass.set_pipeline(&self.col_pipe);
+                    pass.set_bind_group(0, &self.col_bg, &[]);
+                    pass.dispatch_workgroups(wg_x, wg_y, 1);
+                }
+                self.queue.submit(std::iter::once(encoder.finish()));
+                self.device.poll(wgpu::Maintain::Wait);
             }
         }
 
-        {
-            let mut fin_params = base_gpu_params;
-            fin_params.num_samples = num_samples;
-            if !use_median {
-                let total_weight: f32 = samples.iter().map(|s| s.2).sum();
-                fin_params.sample_weight = total_weight;
-            }
-            if use_perturb {
-                fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
-            }
-            let fin_offset = samples.len() as u64 * params_size;
-            self.queue.write_buffer(&self.staging_buf, fin_offset, bytemuck::bytes_of(&fin_params));
-            encoder.copy_buffer_to_buffer(&self.staging_buf, fin_offset, &self.params_buf, 0, params_size);
+        let mut fin_params = base_gpu_params;
+        fin_params.num_samples = num_samples;
+        if !use_median {
+            let total_weight: f32 = samples.iter().map(|s| s.2).sum();
+            fin_params.sample_weight = total_weight;
         }
+        if use_perturb {
+            fin_params.pixel_step = [ps_mantissa_x, ps_mantissa_y];
+        }
+        self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&fin_params));
+        let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             if use_median {
@@ -535,6 +566,13 @@ impl ExportContext {
         rx.recv().map_err(|e| format!("Map recv failed: {e}"))?.map_err(|e| format!("Map failed: {e}"))?;
 
         let data = slice.get_mapped_range();
+        // finalize writes alpha 255 everywhere; an all-zero buffer means the
+        // GPU work never ran (device lost / watchdog), not a black image.
+        if data.iter().all(|&b| b == 0) {
+            drop(data);
+            self.readback_buf.unmap();
+            return Err("GPU produced no output (device lost or driver watchdog timeout?)".into());
+        }
         // Strip stride padding columns
         let pixels = if self.stride == self.display_w {
             data[..(self.display_w * self.height * 4) as usize].to_vec()

@@ -192,6 +192,9 @@ pub struct FractalParams {
     /// measured in pixels of an image this wide, so a 3x render of a 4K view
     /// (ref_width 3840) keeps the same look instead of a 3x thinner glow.
     pub ref_width: u32,
+    /// Disable BLA iteration skipping (exact perturbation). Slower; used for
+    /// final exports, where BLA's approximation error visibly distorts the set.
+    pub no_bla: bool,
     // Nebulabrot-specific params
     pub nebula_iter_r: u32,
     pub nebula_iter_g: u32,
@@ -409,6 +412,7 @@ impl Default for FractalParams {
             coloring_param_2: ColorPalette::Oklab.default_param_2(),
             use_median: true,
             ref_width: 0,
+            no_bla: false,
             nebula_iter_r: 5000,
             nebula_iter_g: 500,
             nebula_iter_b: 50,
@@ -556,7 +560,7 @@ impl FractalParams {
             } else {
                 1.0
             },
-            _pad_128: [0; 1],
+            row_offset: 0,
         }
     }
 }
@@ -1169,6 +1173,6 @@ pub struct GpuParams {
     pub coloring_param_2: f32,    // 4 bytes  (offset 112) — second palette-specific parameter
     pub pixel_step_log2: f32,     // 4 bytes  (offset 116) — log2 of true pixel step (any zoom depth)
     pub px_scale: f32,            // 4 bytes  (offset 120) — output px per reference px (screen-space effects)
-    pub _pad_128: [u32; 1],       // 4 bytes  (offset 124) — pad to 128
+    pub row_offset: u32,          // 4 bytes  (offset 124) — first row of a banded iterate dispatch
 }
 // Total: 128 bytes

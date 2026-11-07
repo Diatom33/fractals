@@ -35,7 +35,7 @@ struct Params {
     coloring_param_2: f32,
     pixel_step_log2: f32,     // log2 of the true pixel step (valid at any zoom depth)
     px_scale: f32,
-    _pad_128c: u32,
+    row_offset: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
