@@ -70,11 +70,24 @@ fn iter_at(i: u32) -> f32 {
 
 //INCLUDE:palettes
 
-fn pack_rgba(rgb: vec3<f32>) -> u32 {
-    let r = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-    let g = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-    let b = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-    return r | (g << 8u) | (b << 16u) | (255u << 24u);
+// Triangular-PDF dither of +-1 LSB before 8-bit quantization: dark smooth
+// gradients otherwise show 1-level steps and streaks in print-size renders.
+fn dither_hash(v: u32) -> f32 {
+    var h = v * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (h >> 22u) ^ h;
+    return f32(h & 0xffffu) / 65535.0;
+}
+
+fn pack_rgba_at(rgb: vec3<f32>, x: u32, y: u32) -> u32 {
+    let seed = x * 1973u + y * 9277u;
+    let d = vec3<f32>(
+        dither_hash(seed) + dither_hash(seed ^ 0x9e3779b9u) - 1.0,
+        dither_hash(seed + 0x632be5abu) + dither_hash(seed ^ 0x85ebca6bu) - 1.0,
+        dither_hash(seed + 0xc2b2ae35u) + dither_hash(seed ^ 0x27d4eb2fu) - 1.0,
+    );
+    let v = clamp(floor(rgb * 255.0 + 0.5 + d), vec3<f32>(0.0), vec3<f32>(255.0));
+    return u32(v.x) | (u32(v.y) << 8u) | (u32(v.z) << 16u) | (255u << 24u);
 }
 
 // -- Main: median of exterior iterations, color, composite --------------------
@@ -117,7 +130,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // All interior
     if ext_count == 0u {
-        output[idx] = pack_rgba(icolor);
+        output[idx] = pack_rgba_at(icolor, x, y);
         return;
     }
 
@@ -157,5 +170,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ext_coverage = f32(ext_count) / f32(n);
     let final_color = mix(icolor, color, ext_coverage);
 
-    output[idx] = pack_rgba(final_color);
+    output[idx] = pack_rgba_at(final_color, x, y);
 }

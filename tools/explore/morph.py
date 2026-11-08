@@ -35,6 +35,8 @@ SEEDS = [
     ("-1.25066", "0.02012", 2e-3, "period-2-bulb", "busy"),
     ("0.3750", "0.2160", 4e-3, "east-valley", "busy"),
     ("-0.5600", "0.6400", 4e-3, "north-spirals", "busy"),
+    # Spiral Canopy, level 1 (round-12 loves): walk the zone around its minibrot
+    ("-1.5397164778102671669261739145e-01", "1.0306485936161868994812085884665e+00", 1.8e-7, "spiral-canopy", "ridge"),
 ]
 # The user's loved/liked spots from rounds 1-2, im already negated into the
 # standard orientation (favorites.json, built from the gallery ratings).

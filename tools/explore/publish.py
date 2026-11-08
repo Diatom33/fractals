@@ -14,6 +14,7 @@ from emptiness import is_empty
 from screen import render_cand
 
 GAL = Path(__file__).resolve().parent / "gallery"
+MEAN_PALETTES = {"glade", "obsidian", "noctilucent", "lichtenberg", "corona", "slotcanyon", "canopy", "thinfilm"}
 
 
 def main():
@@ -34,7 +35,10 @@ def main():
         key = f"{p['id']}_{p['palette'].replace('@', '-')}"
         big, thumb = GAL / "img" / f"{key}.jpg", GAL / "img" / f"t_{key}.jpg"
         if not big.exists():
-            render_cand(c, tmp, p["palette"], 1600, 1200, extra=["--ss", "2"], pparam=p.get("pparam"))
+            # Palettes reading per-sample z/orbit data render with mean AA (the CLI
+            # default for them); --ss 3 gives them the same 9 samples median gets at 2.
+            ss = "3" if p["palette"].split("@")[0] in MEAN_PALETTES else "2"
+            render_cand(c, tmp, p["palette"], 1600, 1200, extra=["--ss", ss], pparam=p.get("pparam"))
             im = Image.open(tmp).convert("RGB")
             im.save(big, quality=90)
             im.resize((800, 600), Image.LANCZOS).save(thumb, quality=86)

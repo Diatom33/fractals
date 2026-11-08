@@ -481,7 +481,13 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
     // Parse --no-bla: exact perturbation, no BLA skipping (slower, undistorted).
     params.no_bla = args.iter().any(|a| a == "--no-bla");
 
-    // Parse --no-median / --median (default: median on)
+    // Parse --no-median / --median. Default: median only where it is valid.
+    // Median AA keeps per-sample iteration counts but only ONE sample's
+    // final_z / orbit data, so palettes that read those (DE, relief, stripes,
+    // traps) get 1-spp sparkle and mismatch seams under median; they default to
+    // mean (per-sample coloring). Iteration-only and neighbor-reading palettes
+    // keep median.
+    params.use_median = params.palette.median_safe();
     if args.iter().any(|a| a == "--no-median") {
         params.use_median = false;
     }

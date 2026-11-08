@@ -62,6 +62,16 @@ DS pixels. BLA uses `BLA_EPS` = 2^-24 (2^-10 visibly distorted the set) and a
 bottom-up level search. Accurate BLA only skips much at deep zooms; at ~1e-8 with
 huge max_iter it costs about what no-BLA does.
 
+### Median AA keeps only one sample's signals
+Median supersampling stores every sample's smooth iteration but only ONE
+sample's `final_z` / `orbit_traps`. Palettes that read those (DE, relief,
+stripe, traps: Glade, Obsidian, Noctilucent, Lichtenberg, Corona, Slot Canyon,
+Canopy, Thin Film) get 1-spp sparkle and iteration-boundary seams under median,
+so the CLI defaults them to mean AA (`ColorPalette::median_safe()`); use
+`--ss 3` for 9 samples. Median stays the default for iteration-only and
+neighbor-reading palettes (Biolum, Storm, STEVE, ...). Finalize applies a TPDF
+dither before 8-bit packing so dark gradients don't step.
+
 ### Per-pixel Signal Conventions
 `final_z` per pixel is `(z.re, z.im, log2|dz|, arg(dz))` — the derivative is
 tracked in extended range (mantissa + exponent) through escape, perturbation,

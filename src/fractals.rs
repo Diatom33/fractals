@@ -315,6 +315,26 @@ impl ColorPalette {
         matches!(self, ColorPalette::Storm | ColorPalette::Bioluminescence | ColorPalette::Steve)
     }
 
+    /// Whether median supersampling is valid for this palette: its color depends
+    /// only on the (median) iteration field, or it reads neighbor pixels and needs
+    /// one consistent field. Palettes reading per-sample final_z / orbit_traps
+    /// (DE, relief, stripe, traps) must use mean AA, since median keeps only one
+    /// sample of those.
+    pub fn median_safe(&self) -> bool {
+        matches!(
+            self,
+            ColorPalette::Classic
+                | ColorPalette::Oklab
+                | ColorPalette::Smooth
+                | ColorPalette::Monochrome
+                | ColorPalette::Aurora
+                | ColorPalette::Storm
+                | ColorPalette::Bioluminescence
+                | ColorPalette::Steve
+                | ColorPalette::InvertedPair
+        )
+    }
+
     /// Whether this palette needs per-iteration orbit data (orbit traps,
     /// stripe averages, interior field). BLA iteration-skipping starves those
     /// accumulators, so it's disabled while one of these palettes is active.
