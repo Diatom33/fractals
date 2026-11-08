@@ -1,6 +1,6 @@
 """Make per-image QA sheets for a gallery round: the full frame downscaled to 800x600 plus two 1:1
 crops from the 1600x1200 render (busiest region: grain/noise/aliasing; smoothest region: banding,
-seams). Usage: qa.py round_title_prefix out_dir   -> out_dir/<item id>.png, prints the list.
+seams). Usage: qa.py round_title_prefix|picks.json out_dir   -> out_dir/<item id>.png, prints the list.
 """
 import json
 import sys
@@ -31,9 +31,13 @@ def crops(im):
 def main():
     prefix, od = sys.argv[1], Path(sys.argv[2])
     od.mkdir(parents=True, exist_ok=True)
-    g = json.load(open(GAL / "gallery.json"))
-    rnd = next(r for r in g["rounds"] if r["title"].startswith(prefix))
-    for it in rnd["items"]:
+    if prefix.endswith(".json"):
+        keys = [f"{p['id']}_{p['palette'].replace('@', '-')}" for p in json.load(open(prefix))]
+        items = [{"id": k, "src": f"img/{k}.jpg"} for k in keys]
+    else:
+        g = json.load(open(GAL / "gallery.json"))
+        items = next(r for r in g["rounds"] if r["title"].startswith(prefix))["items"]
+    for it in items:
         im = Image.open(GAL / it["src"]).convert("RGB")
         if im.width < 1600:
             print("SKIP (thumbnail only)", it["id"]); continue
