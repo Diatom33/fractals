@@ -50,6 +50,9 @@ struct PerturbParams {
     pixel_step_exp: i32,
     bla_num_levels: u32,    // 0 disables BLA (per-step perturbation only)
     _pad: u32,
+    // (view center - reference) in pixels, DS: (x_hi, x_lo, y_hi, y_lo).
+    // Nonzero when the reference is a minibrot nucleus rather than the center.
+    ref_off: vec4<f32>,
 }
 
 // One BLA node: applies 2^level iterations as δ ← A·δ + B·δc.
@@ -228,8 +231,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Compute dc with DS precision: dx_pixels exact, dx*ps via two_prod.
     let dx_pixels = f32(x) + params.sample_offset.x - f32(w - 1u) * 0.5;
     let dy_pixels = f32(y) + params.sample_offset.y - f32(h - 1u) * 0.5;
-    let dcx = two_prod(dx_pixels, params.pixel_step.x);
-    let dcy = two_prod(dy_pixels, params.pixel_step.y);
+    // Offset relative to the reference: (dx_pixels + ref_off) * pixel_step,
+    // kept double-single (two_sum carries the rounding of the pixel sum).
+    let sx = two_sum(dx_pixels, perturb.ref_off.x);
+    let sy = two_sum(dy_pixels, perturb.ref_off.z);
+    let px_lo = sx.y + perturb.ref_off.y;
+    let py_lo = sy.y + perturb.ref_off.w;
+    let pcx = two_prod(sx.x, params.pixel_step.x);
+    let pcy = two_prod(sy.x, params.pixel_step.y);
+    let dcx = fast_two_sum(pcx.x, pcx.y + px_lo * params.pixel_step.x);
+    let dcy = fast_two_sum(pcy.x, pcy.y + py_lo * params.pixel_step.y);
     var dc = vec4<f32>(dcx.x, dcx.y, dcy.x, dcy.y);
     var dc_e = perturb.pixel_step_exp;
     // Normalize so max(|dc.re|, |dc.im|) is in [1, 2).
@@ -293,16 +304,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dn_mag2 = dn.x * dn.x + dn.z * dn.z;
             if dn_mag2 > 0.0 {
                 let delta_log2 = f32(dn_e) + 0.5 * log2(dn_mag2);
-                var L = max_lvl;
+                // Search bottom-up: a node's validity radius never grows with
+                // level (each merge takes min(r1, ...)), and the skip bounds are
+                // monotone too, so the first failing level ends the search.
+                // Usually that's level 1 -> one read, then an exact step. (A
+                // top-down search pays ~num_levels reads per iteration whenever
+                // nothing is skippable, which made BLA slower than none.)
+                // Level 0 is never applied: it's the exact step minus δ².
+                var best: u32 = 0u;
+                var L: u32 = 1u;
                 loop {
-                    if L == 0u { break; }
-                    L = L - 1u;
-                    if L >= 31u { continue; }
-                    let skip = 1u << L;
-                    if (i + skip) > max_i { continue; }
-                    if (ref_i + skip) > ref_len { continue; }
-                    let node = bla_tree[ref_i * max_lvl + L];
-                    if node.radius_log2 >= delta_log2 {
+                    if L >= max_lvl || L >= 31u { break; }
+                    let skip_l = 1u << L;
+                    if (i + skip_l) > max_i || (ref_i + skip_l) > ref_len { break; }
+                    if bla_tree[ref_i * max_lvl + L].radius_log2 < delta_log2 { break; }
+                    best = L;
+                    L = L + 1u;
+                }
+                if best > 0u {
+                    let skip = 1u << best;
+                    let node = bla_tree[ref_i * max_lvl + best];
+                    {
                         // Apply BLA: δ ← A·δ + B·δc with full DS×DS precision.
                         // node.a/b are DS-complex (re_hi, re_lo, im_hi, im_lo).
                         let a_dsc = dsc_mul(
@@ -340,7 +362,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                         ref_i = ref_i + skip;
                         step = skip;
-                        break;
                     }
                 }
             }
@@ -524,6 +545,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let z_ref_mag2 = z_ref_re * z_ref_re + z_ref_im * z_ref_im;
             // ε = 1e-3 → ε² = 1e-6 (Zhuoran's default)
             should_rebase = mag2 < 1.0e-6 * z_ref_mag2;
+        }
+        // End of the reference: wrap to its start (exact for Z_0 = 0, i.e. not
+        // Julia). For a periodic nucleus reference this happens every period;
+        // without it the loop would stop at ref_len and mislabel the pixel as
+        // interior. δ stays double-single here (the Zhuoran rebase below drops
+        // to f32 z_full, fine near z = 0 but lossy once per period).
+        if !is_julia && ref_i + 1u >= ref_len && !should_rebase {
+            let zl = ref_orbit[min(ref_i, ref_len - 1u)];
+            // Common exponent from the actual magnitudes: at a nucleus Z_p ~ 0
+            // and deep-zoom δ is tiny too, so a fixed 0 would underflow both.
+            // A stored Z below 1e-30 is treated as exactly 0 (Newton puts the
+            // nucleus within ~1e-9 px, far below δ's scale).
+            let zmax = max(abs(zl.x), abs(zl.y));
+            let z_ok = zmax > 1e-30;
+            let zd = select(vec4<f32>(0.0), vec4<f32>(zl.x, zl.z, zl.y, zl.w), z_ok);
+            let e_z = select(-100000, i32(floor(log2(zmax))), z_ok);
+            let e_max = max(e_z, dn_e);
+            var sum = dsc_add(dsc_ldexp(zd, -e_max), dsc_ldexp(dn, dn_e - e_max));
+            let s = dsc_renorm_shift(sum);
+            dn = dsc_ldexp(sum, s);
+            dn_e = e_max - s;
+            ref_i = 0u;
         }
         if should_rebase {
             dn = vec4<f32>(z_full.x, 0.0, z_full.y, 0.0);

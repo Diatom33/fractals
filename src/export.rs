@@ -44,6 +44,9 @@ struct OrbitCache {
     bla_num_levels: u32,
     delta_c_max: f64,
     pixel_step: f64,
+    /// Perturbation reference point (view center, or a minibrot nucleus).
+    ref_re: Float,
+    ref_im: Float,
 }
 
 /// A headless wgpu device plus all pipelines and buffers needed to render
@@ -334,13 +337,30 @@ impl ExportContext {
 
         status("Computing reference orbit...".to_string());
         let is_mandelbrot = params.fractal_type == FractalType::Mandelbrot;
+        let mut ref_re = params.center_re.clone();
+        let mut ref_im = params.center_im.clone();
         let (orbit_len, bla_num_levels) = if is_mandelbrot {
-            let eps = 1.0 / 1024.0;
-            let perturb_data = fractals::compute_mandelbrot_with_bla(
-                &params.center_re, &params.center_im,
-                params.max_iter, pixel_step,
-                delta_c_max.max(1e-300), eps,
+            // Search for a nucleus within at most 1e4 px (at the deepest step)
+            // so the reference offset stays exactly representable in the
+            // shader's double-single pixel units, even for zoom videos whose
+            // delta_c_max spans the shallowest frame.
+            let search_r = delta_c_max.min(pixel_step * 1e4);
+            let max_period = params.max_iter.min(fractals::BLA_MAX_REF_LEN as u32);
+            let reference = fractals::find_mandelbrot_reference(
+                &params.center_re, &params.center_im, search_r, max_period, pixel_step,
             );
+            let dist = Float::with_val(128, &reference.re - &params.center_re).to_f64()
+                .hypot(Float::with_val(128, &reference.im - &params.center_im).to_f64());
+            let perturb_data = fractals::compute_mandelbrot_with_bla(
+                &reference.re, &reference.im,
+                params.max_iter, pixel_step,
+                (delta_c_max + dist).max(1e-300), fractals::BLA_EPS, reference.period,
+            );
+            if let Some(p) = reference.period {
+                status(format!("Reference: period-{p} nucleus, {:.0} px from center", dist / pixel_step));
+            }
+            ref_re = reference.re;
+            ref_im = reference.im;
             self.queue.write_buffer(&self.ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
             if !perturb_data.bla.is_empty() {
                 self.queue.write_buffer(&self.bla_buf, 0, bytemuck::cast_slice(&perturb_data.bla));
@@ -376,13 +396,12 @@ impl ExportContext {
             bla_num_levels,
             delta_c_max,
             pixel_step,
+            ref_re,
+            ref_im,
         });
         Ok(())
     }
 
-    /// Render one frame and return RGBA pixels at display_w x height
-    /// (stride padding stripped). The context's use_median mode wins over
-    /// params.use_median (buffers are sized for it).
     /// Dispatch `pipe` over the frame in horizontal bands, one submit each,
     /// with band height adapted to ~0.75 s of GPU time (`band_wg` carries the
     /// estimate between calls). A single whole-frame dispatch can run for
@@ -436,6 +455,9 @@ impl ExportContext {
         }
     }
 
+    /// Render one frame and return RGBA pixels at display_w x height
+    /// (stride padding stripped). The context's use_median mode wins over
+    /// params.use_median (buffers are sized for it).
     pub fn render_frame(
         &mut self,
         params: &FractalParams,
@@ -486,6 +508,7 @@ impl ExportContext {
                 pixel_step_exp: ps_exp,
                 bla_num_levels,
                 _pad: 0,
+                ref_off: PerturbGpuParams::ref_offset(params, &cache.ref_re, &cache.ref_im, pixel_step, step_y),
             };
             self.queue.write_buffer(&self.perturb_params_buf, 0, bytemuck::bytes_of(&pgpu));
         }
