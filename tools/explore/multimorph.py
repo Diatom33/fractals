@@ -121,7 +121,7 @@ def main():
         for lvl in range(1, 4):
             iters = 800 + 1500 * lvl
             found = None
-            for _attempt in range(14):
+            for _attempt in range(14 if D <= 3 else 30):
                 T = busy_pick(rng, tmp, center, width, iters)
                 if T is None:
                     break
@@ -132,7 +132,7 @@ def main():
                 if N is None or abs(complex(N - T)) > float(width) * 0.3:
                     continue
                 s = mini_size(N, float(width) * 1e-3, iters + 30 * per, tmp)
-                if not s or not (float(width) * 1e-7 < s < float(width) * 0.05) or (last_s and s > last_s * 0.05):
+                if not s or not (float(width) * 1e-7 < s < float(width) * 0.05) or (last_s and s > last_s * (0.05 if D <= 3 else 0.3)):
                     continue
                 found = (N, per, s)
                 break
@@ -149,7 +149,8 @@ def main():
             print(f"walk {wk} level {lvl} period {per} size {s:.1e} n(k=8,25,80,250)={orders}", flush=True)
             last_p = per
             last_s = s
-            center, width = N, mpfr(s * rng.uniform(150, 500))
+            # high degrees keep their decoration close to the minibrot
+            center, width = N, mpfr(s * (rng.uniform(150, 500) if D <= 3 else rng.uniform(25, 120)))
             if s * 300 < 1e-28:
                 break
     json.dump(rows, open(od / f"d{D}.json", "w"), indent=0)

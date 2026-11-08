@@ -9,7 +9,7 @@ from pathlib import Path
 
 import fr
 
-TYPE_FLAG = {"mandelbrot": "mandelbrot", "julia": "julia", "burningship": "burningship",
+TYPE_FLAG = {"mandelbrot": "mandelbrot", "multibrot": "multibrot", "julia": "julia", "burningship": "burningship",
              "tricorn": "tricorn", "celtic": "celtic", "perpendicular": "perpendicular",
              "buffalo": "buffalo"}
 
@@ -23,7 +23,7 @@ def render_cand(c, out, palette, w, h, extra=(), pparam=None, iters=None, pparam
             pparam2 = float(vs[1])
     return fr.render(out, type=TYPE_FLAG[c["type"]], palette=palette, cre=c["cre"], cim=c["cim"],
                      zoom=c["zoom"], iters=iters or c["iters"], w=w, h=h,
-                     julia=c.get("julia"), extra=extra, pparam=pparam, pparam2=pparam2)
+                     julia=c.get("julia"), power=c.get("power"), extra=extra, pparam=pparam, pparam2=pparam2)
 
 
 def main():
