@@ -226,6 +226,7 @@ pub enum ColorPalette {
     Kintsugi,         // 19: Gold-leaf DE seams with metallic relief on black lacquer, stripe veins
     Halo,             // 20: Dawn light graded by pixel-space distance; Julia-first soft shapes
     Abyssal,          // 21: Zoom-invariant bioluminescence: cyan DE filaments, plankton bokeh
+    Verdigris,        // 22: Oxidized brass: relief-lit brass with verdigris patina in the recesses
 }
 
 impl ColorPalette {
@@ -252,6 +253,7 @@ impl ColorPalette {
         ColorPalette::Kintsugi,
         ColorPalette::Halo,
         ColorPalette::Abyssal,
+        ColorPalette::Verdigris,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -278,6 +280,7 @@ impl ColorPalette {
             ColorPalette::Kintsugi => "Kintsugi",
             ColorPalette::Halo => "Halo",
             ColorPalette::Abyssal => "Abyssal",
+            ColorPalette::Verdigris => "Verdigris",
         }
     }
 
@@ -305,6 +308,7 @@ impl ColorPalette {
             ColorPalette::Kintsugi => 19,
             ColorPalette::Halo => 20,
             ColorPalette::Abyssal => 21,
+            ColorPalette::Verdigris => 22,
         }
     }
 
@@ -329,6 +333,7 @@ impl ColorPalette {
             ColorPalette::Kintsugi => 2.2,
             ColorPalette::Halo => 4.0,
             ColorPalette::Abyssal => 5.0,
+            ColorPalette::Verdigris => 4.0,
             _ => 0.0,
         }
     }
@@ -378,6 +383,7 @@ impl ColorPalette {
                 | ColorPalette::Kintsugi
                 | ColorPalette::Halo
                 | ColorPalette::Abyssal
+                | ColorPalette::Verdigris
         )
     }
 
@@ -410,6 +416,7 @@ impl ColorPalette {
             ColorPalette::Kintsugi => "Light azimuth",
             ColorPalette::Halo => "Bokeh scale",
             ColorPalette::Abyssal => "Bokeh scale",
+            ColorPalette::Verdigris => "Light azimuth",
             _ => "",
         }
     }
@@ -429,6 +436,7 @@ impl ColorPalette {
             ColorPalette::Kintsugi => 6.0,
             ColorPalette::Halo => 24.0,
             ColorPalette::Abyssal => 24.0,
+            ColorPalette::Verdigris => 0.6,
             _ => 0.0,
         }
     }
@@ -449,6 +457,7 @@ impl ColorPalette {
                 | ColorPalette::Kintsugi
                 | ColorPalette::Halo
                 | ColorPalette::Abyssal
+                | ColorPalette::Verdigris
         )
     }
 
@@ -467,6 +476,7 @@ impl ColorPalette {
             ColorPalette::Kintsugi => "Vein density",
             ColorPalette::Halo => "Bokeh memory",
             ColorPalette::Abyssal => "Bokeh memory",
+            ColorPalette::Verdigris => "Patina",
             _ => "",
         }
     }

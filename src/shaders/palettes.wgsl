@@ -1014,6 +1014,43 @@ fn palette_abyssal(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, 
     return tone_fit(col);
 }
 
+// Palette 22: Verdigris — oxidized brass. Relief-shaded brass along the set
+// with specular glints on the high points; green-blue patina gathers in the
+// recesses (low relief) and is mottled by the stripe field like real weathering;
+// a dark oxidized-bronze ground. param 1 = light azimuth, param 2 = patina amount.
+fn palette_verdigris(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let azimuth = params.coloring_param;
+    let patina_amt = clamp(params.coloring_param_2, 0.0, 1.5);
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    var col = vec3<f32>(0.040, 0.050, 0.040) + vec3<f32>(0.010, 0.014, 0.010) * cos(log_iter * 0.27);
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, azimuth, 0.9);
+        let de = de_px(z, dz_log2);
+        // the metal body hugs the set; far exterior stays dark bronze
+        let body = clamp(exp(-de / 3.5) * 1.4, 0.0, 1.0);
+        let brass_dark = vec3<f32>(0.34, 0.21, 0.05);
+        let brass_lit = vec3<f32>(0.96, 0.72, 0.30);
+        var metal = mix(brass_dark, brass_lit, shade * shade);
+        // patina: settles in recesses (low relief) and in broad weathered patches
+        // from the stripe field; coverage is a soft threshold so whole areas turn
+        // green instead of a faint tint at every edge
+        let mottle = smoothstep(0.30, 0.80, s);
+        let recess = 1.0 - shade;
+        let cover = smoothstep(0.35, 0.75, recess * 0.75 + mottle * 0.55) * patina_amt;
+        let pat = clamp(cover, 0.0, 1.0);
+        let verd_deep = vec3<f32>(0.10, 0.36, 0.30);
+        let verd_pale = vec3<f32>(0.48, 0.80, 0.66);
+        metal = mix(metal, mix(verd_deep, verd_pale, clamp(shade * 0.8 + mottle * 0.3, 0.0, 1.0)), pat);
+        // specular glint on exposed brass only
+        metal += vec3<f32>(1.0, 0.90, 0.65) * pow(shade, 22.0) * (1.0 - pat) * 0.45;
+        // ground: dark bronze with a patina bloom near the metal
+        let ground = col + vec3<f32>(0.04, 0.11, 0.08) * exp(-de / 10.0) * patina_amt;
+        col = mix(ground, metal, body);
+    }
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 // ── Interior coloring (palettes 11+) ────────────────────────────────────────
 // Classic palettes keep pure-black interiors. The new palettes read the
 // interior field — the orbit-average of exp(-|z|), a smooth bounded value
@@ -1057,6 +1094,7 @@ fn interior_color(z: vec2<f32>, idx: u32) -> vec3<f32> {
         case 19u: { return vec3<f32>(0.010, 0.007, 0.006) + vec3<f32>(0.030, 0.020, 0.010) * f; }
         case 20u: { return vec3<f32>(0.020, 0.018, 0.060) + vec3<f32>(0.040, 0.030, 0.080) * smoothstep(0.2, 0.9, f); }
         case 21u: { return vec3<f32>(0.002, 0.006, 0.016) + vec3<f32>(0.010, 0.030, 0.050) * smoothstep(0.2, 0.9, f); }
+        case 22u: { return vec3<f32>(0.012, 0.020, 0.016) + vec3<f32>(0.020, 0.045, 0.035) * smoothstep(0.2, 0.9, f); }
         default: { return vec3<f32>(0.0); }
     }
 }
@@ -1085,6 +1123,7 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, px:
         case 19u: { return palette_kintsugi(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         case 20u: { return palette_halo(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         case 21u: { return palette_abyssal(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
+        case 22u: { return palette_verdigris(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         default: { return palette_classic(smooth_iter); }
     }
 }

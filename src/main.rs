@@ -437,6 +437,7 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
                 "kintsugi" => fractals::ColorPalette::Kintsugi,
                 "halo" => fractals::ColorPalette::Halo,
                 "abyssal" => fractals::ColorPalette::Abyssal,
+                "verdigris" | "patina" | "brass" => fractals::ColorPalette::Verdigris,
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();

@@ -411,7 +411,8 @@ impl eframe::App for FractalApp {
                                 | crate::fractals::ColorPalette::Hoarfrost
                                 | crate::fractals::ColorPalette::Halo
                                 | crate::fractals::ColorPalette::Abyssal => 0.5..=16.0,
-                                crate::fractals::ColorPalette::Kintsugi => 0.0..=std::f32::consts::TAU,
+                                crate::fractals::ColorPalette::Kintsugi
+                                | crate::fractals::ColorPalette::Verdigris => 0.0..=std::f32::consts::TAU,
                                 _ => 0.0..=1.0,
                             };
                             let step = match self.params.palette {
@@ -444,6 +445,7 @@ impl eframe::App for FractalApp {
                                 | crate::fractals::ColorPalette::Halo
                                 | crate::fractals::ColorPalette::Abyssal => 2.0..=200.0,
                                 crate::fractals::ColorPalette::Kintsugi => 0.5..=20.0,
+                                crate::fractals::ColorPalette::Verdigris => 0.0..=1.5,
                                 _ => 0.0..=1.0,
                             };
                             let step2 = match self.params.palette {

@@ -15,7 +15,7 @@ from screen import render_cand
 
 GAL = Path(__file__).resolve().parent / "gallery"
 MEAN_PALETTES = {"glade", "obsidian", "noctilucent", "lichtenberg", "corona", "slotcanyon", "canopy", "thinfilm",
-                 "lantern", "hoarfrost", "kintsugi", "halo", "abyssal"}
+                 "lantern", "hoarfrost", "kintsugi", "halo", "abyssal", "verdigris"}
 
 
 def main():
