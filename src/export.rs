@@ -684,7 +684,8 @@ fn render_in_strips(
         let top = r0.saturating_sub(STRIP_MARGIN).min(height - hs);
         let mut sp = params.clone();
         let off_rows = (top as f64 + (hs - 1) as f64 / 2.0) - (height - 1) as f64 / 2.0;
-        sp.center_im += off_rows * step_y;
+        // Rows run top to bottom = decreasing imaginary part.
+        sp.center_im -= off_rows * step_y;
         sp.half_range_y = step_y * (hs - 1) as f64 / 2.0;
         status(format!("Strip {}/{} (rows {}..{})", s + 1, n, r0, r1));
         let strip = ctx.render_frame(&sp, &|msg| status(format!("Strip {}/{}: {msg}", s + 1, n)))?;

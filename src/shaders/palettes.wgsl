@@ -349,7 +349,7 @@ fn palette_storm(smooth_iter: f32, px: u32, py: u32, sample_base: u32) -> vec3<f
     let cell_px = 55.0 * noise_scale;
     let noise_pos = vec2<f32>(
         (f32(px) - f32(params.resolution.x) * 0.5) / cell_px + params.noise_seed.x,
-        (f32(py) - f32(params.resolution.y) * 0.5) / cell_px + params.noise_seed.y
+        (f32(params.resolution.y) * 0.5 - f32(py)) / cell_px + params.noise_seed.y
     );
 
     let noise_val = fbm_noise(noise_pos, 5);

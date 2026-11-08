@@ -197,7 +197,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Compute pixel coordinate in double-single precision
     // pixel = center + (pixel_index - (resolution-1)/2) * pixel_step
     let dx_pixels = f32(x) + params.sample_offset.x - f32(w - 1u) * 0.5;
-    let dy_pixels = f32(y) + params.sample_offset.y - f32(h - 1u) * 0.5;
+    // Screen y grows downward, the imaginary axis upward (standard orientation).
+    let dy_pixels = f32(h - 1u) * 0.5 - (f32(y) + params.sample_offset.y);
     let dx = two_prod(dx_pixels, params.pixel_step.x);
     let dy = two_prod(dy_pixels, params.pixel_step.y);
     let pixel_r = ds_add(vec2<f32>(params.center_hi.x, params.center_lo.x), dx);

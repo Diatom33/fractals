@@ -230,7 +230,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // delta_c in extended-range DS: pixel_step is mantissa, pixel_step_exp is exponent.
     // Compute dc with DS precision: dx_pixels exact, dx*ps via two_prod.
     let dx_pixels = f32(x) + params.sample_offset.x - f32(w - 1u) * 0.5;
-    let dy_pixels = f32(y) + params.sample_offset.y - f32(h - 1u) * 0.5;
+    // Screen y grows downward, the imaginary axis upward (standard orientation).
+    let dy_pixels = f32(h - 1u) * 0.5 - (f32(y) + params.sample_offset.y);
     // Offset relative to the reference: (dx_pixels + ref_off) * pixel_step,
     // kept double-single (two_sum carries the rounding of the pixel sum).
     let sx = two_sum(dx_pixels, perturb.ref_off.x);

@@ -88,7 +88,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Map z to pixel coordinates in the view
             let tx = (zr - params.view_min.x) / view_range.x;
-            let ty = (zi - params.view_min.y) / view_range.y;
+            // Row 0 is the top of the view (largest imaginary part).
+            let ty = (params.view_max.y - zi) / view_range.y;
 
             if tx >= 0.0 && tx < 1.0 && ty >= 0.0 && ty < 1.0 {
                 let px = u32(tx * res_x);

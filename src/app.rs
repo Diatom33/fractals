@@ -1078,7 +1078,7 @@ impl eframe::App for FractalApp {
                         let cx = self.params.center_re.to_f64()
                             + (frac_x - 0.5) * 2.0 * self.params.half_range_x;
                         let cy = self.params.center_im.to_f64()
-                            + (frac_y - 0.5) * 2.0 * self.params.half_range_y;
+                            - (frac_y - 0.5) * 2.0 * self.params.half_range_y;
                         self.cursor_complex = Some((cx, cy));
                     } else {
                         self.cursor_complex = None;
@@ -1112,7 +1112,8 @@ impl FractalApp {
                     self.params.ensure_precision();
 
                     let offset_re = (frac_x - 0.5) * 2.0 * self.params.half_range_x;
-                    let offset_im = (frac_y - 0.5) * 2.0 * self.params.half_range_y;
+                    // Screen y down = imaginary down (standard orientation).
+                    let offset_im = -(frac_y - 0.5) * 2.0 * self.params.half_range_y;
 
                     let shift_re = Float::with_val(
                         self.params.center_re.prec(),
@@ -1167,7 +1168,7 @@ impl FractalApp {
                 let dy_px = self.drag_pixel_offset.y as f64;
                 if dx_px != 0.0 || dy_px != 0.0 {
                     let dx = -dx_px / rect.width() as f64 * (2.0 * orig.half_range_x);
-                    let dy = -dy_px / rect.height() as f64 * (2.0 * orig.half_range_y);
+                    let dy = dy_px / rect.height() as f64 * (2.0 * orig.half_range_y);
                     self.params.ensure_precision();
                     self.params.center_re = Float::with_val(
                         orig.center_re.prec(),
@@ -1202,7 +1203,7 @@ impl FractalApp {
                 );
                 let dy = Float::with_val(
                     self.params.center_im.prec(),
-                    (frac_y - 0.5) * 2.0 * self.params.half_range_y,
+                    -(frac_y - 0.5) * 2.0 * self.params.half_range_y,
                 );
                 self.params.center_re += dx;
                 self.params.center_im += dy;
@@ -1272,7 +1273,7 @@ impl FractalApp {
             if up {
                 let dy = Float::with_val(
                     self.params.center_im.prec(),
-                    -2.0 * self.params.half_range_y * pan_frac,
+                    2.0 * self.params.half_range_y * pan_frac,
                 );
                 self.params.center_im += dy;
                 self.needs_render = true;
@@ -1280,7 +1281,7 @@ impl FractalApp {
             if down {
                 let dy = Float::with_val(
                     self.params.center_im.prec(),
-                    2.0 * self.params.half_range_y * pan_frac,
+                    -2.0 * self.params.half_range_y * pan_frac,
                 );
                 self.params.center_im += dy;
                 self.needs_render = true;
