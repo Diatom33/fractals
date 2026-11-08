@@ -46,7 +46,7 @@ def main():
             "pparam": p.get("pparam"), "title": p.get("title"), "blurb": p.get("blurb"),
             # morph candidates use the standard orientation (screen up = +im);
             # rounds 1-2 used the old flipped one.
-            "orient": "std" if p["id"].startswith("morph") else "old",
+            "orient": "std" if p["id"].startswith(("morph", "mini")) else "old",
         })
         print("added", key, flush=True)
     json.dump(gallery, open(gj, "w"), indent=1)

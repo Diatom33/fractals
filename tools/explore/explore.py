@@ -187,7 +187,7 @@ def walk(args):
         if sc < (8.0 if MINIS else 4.0):
             return None
         S = escape_grid(kind, center, width, 240, 180, it, jc)
-        met = {**frame_metrics(S), **{k: met[k] for k in ("blobs", "size_range", "comp")}}
+        met = {**frame_metrics(S), **{k: met[k] for k in ("blobs", "size_range", "comp", "visible_minis") if k in met}}
         met["ok"] = True
     else:
         S = escape_grid(kind, center, width, 240, 180, it, jc)
