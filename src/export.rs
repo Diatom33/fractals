@@ -375,7 +375,7 @@ impl ExportContext {
             let perturb_data = fractals::compute_variant_reference_orbit(
                 &params.center_re, &params.center_im,
                 params.max_iter, pixel_step,
-                params.fractal_type, julia_c,
+                params.fractal_type, julia_c, params.power,
             );
             self.queue.write_buffer(&self.ref_orbit_buf, 0, bytemuck::cast_slice(&perturb_data.orbit));
             (perturb_data.orbit_len, 0u32)
@@ -482,7 +482,8 @@ impl ExportContext {
 
         let pixel_step = params.pixel_step_x(self.display_w);
         let use_perturb = params.fractal_type.is_escape_time()
-            && params.fractal_type != FractalType::Multibrot
+            && (params.fractal_type != FractalType::Multibrot
+                || (params.power - params.power.round()).abs() < 1e-4)
             && pixel_step < 1e-7;
 
         let step_y = params.pixel_step_y(self.height);

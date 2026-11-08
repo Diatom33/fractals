@@ -277,9 +277,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var i: u32 = 0u; i < max_i; i++) {
 
-        // Derivative update: dz' = 2*z*dz + offset (before z is modified).
-        // Skip for Multibrot (d != 2, formula is d*z^(d-1)*dz which needs cpow).
-        if params.fractal_type != 3u {
+        // Derivative update: dz' = 2*z*dz + offset (before z is modified);
+        // Multibrot with an integer power uses d*z^(d-1)*dz.
+        if params.fractal_type == 3u && is_integer_power {
+            if dz_offset != 0.0 && dz.z < -60.0 {
+                dz = vec3<f32>(1.0, 0.0, 0.0);
+            } else {
+                let pz = vec2<f32>(zr.x, zi.x);
+                var zp = vec2<f32>(1.0, 0.0);
+                for (var j: u32 = 1u; j < multibrot_d; j++) {
+                    zp = cmul(zp, pz);
+                }
+                var ndz = f32(multibrot_d) * cmul(zp, dz.xy);
+                if dz_offset != 0.0 && dz.z <= 120.0 {
+                    ndz.x += dz_offset * exp2(-dz.z);
+                }
+                dz = dz_renorm(vec3<f32>(ndz, dz.z));
+            }
+        } else if params.fractal_type != 3u {
             if dz_offset != 0.0 && dz.z < -60.0 {
                 // |2z·dz| is vanishing next to the +1 offset: dz' ≈ 1.
                 dz = vec3<f32>(1.0, 0.0, 0.0);
@@ -401,7 +416,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mag2 = zr.x * zr.x + zi.x * zi.x;
         let log_zn = log2(mag2) * 0.5;
         if params.fractal_type == 3u {
-            smooth_val = f32(iter) + 1.0 - log2(log_zn) / log2(params.power);
+            // iter - 1 - log_d(log2|z| / 4): matches the z^2 formula at d = 2, and fract()
+            // wraps exactly where the escape count steps (escape at |z| = 16)
+            smooth_val = f32(iter) - 1.0 - log2(log_zn * 0.25) / log2(params.power);
         } else {
             smooth_val = f32(iter) + 1.0 - log2(log_zn);
         }

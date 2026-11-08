@@ -259,6 +259,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dc_e = dc_e - dc_shift;
 
     let is_julia = ft == 1u;
+    // Multibrot (type 3) with an integer power d: z^d + c, perturbed exactly.
+    let mb_d = u32(clamp(round(params.power), 2.0, 12.0));
 
     // Initial delta: Mandelbrot variants δ₀ = 0; Julia δ₀ = pixel offset.
     // For Mandelbrot, set dn_e = dc_e even though mantissa is zero — at iter 0,
@@ -406,6 +408,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         z_pre.x * dz.x - z_pre.y * dz.y,
                         z_pre.x * dz.y + z_pre.y * dz.x,
                     );
+                    if ft == 3u {
+                        // Multibrot: dz' = d * z^(d-1) * dz (+ offset below)
+                        var zp = vec2<f32>(1.0, 0.0);
+                        for (var j: u32 = 1u; j < mb_d; j++) {
+                            zp = vec2<f32>(zp.x * z_pre.x - zp.y * z_pre.y, zp.x * z_pre.y + zp.y * z_pre.x);
+                        }
+                        ndz = f32(mb_d) * vec2<f32>(zp.x * dz.x - zp.y * dz.y, zp.x * dz.y + zp.y * dz.x);
+                    }
                     if dz_offset != 0.0 && dz.z <= 120.0 {
                         ndz.x += dz_offset * exp2(-dz.z);
                     }
@@ -413,79 +423,122 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
 
-            // ── Pre-square modification on Z and δ ──────────────────
-            // For Burning Ship and Tricorn, modify the operands by sign/conjugation.
-            // δ pre-mods are applied to the mantissa (dn) directly.
-            var Zeff_re_hi = Zn_re_hi;
-            var Zeff_im_hi = Zn_im_hi;
-            var Zeff_re_lo = Zn_re_lo;
-            var Zeff_im_lo = Zn_im_lo;
-            var deff = dn;
-
-            if ft == 2u {
-                // Burning Ship: sign of FULL z (not just reference Z) — needed near fold lines.
-                let dn_re_real = ldexp(dn.x, dn_e);
-                let dn_im_real = ldexp(dn.z, dn_e);
-                let sr = signf(Zn_re_hi + dn_re_real);
-                let si = signf(Zn_im_hi + dn_im_real);
-                Zeff_re_hi = sr * Zn_re_hi;
-                Zeff_im_hi = si * Zn_im_hi;
-                Zeff_re_lo = sr * Zn_re_lo;
-                Zeff_im_lo = si * Zn_im_lo;
-                deff = vec4<f32>(sr * dn.x, sr * dn.y, si * dn.z, si * dn.w);
-            } else if ft == 7u {
-                // Tricorn: Z_eff = conj(Z), δ_eff = conj(δ) — negate imag parts.
-                Zeff_im_hi = -Zn_im_hi;
-                Zeff_im_lo = -Zn_im_lo;
-                deff = vec4<f32>(dn.x, dn.y, -dn.z, -dn.w);
-            }
-
-            // Term 1: 2·Z_eff·δ_eff (DS×DS complex multiply).
-            let t1_dsc_unscaled = dsc_mul(
-                Zeff_re_hi, Zeff_re_lo, Zeff_im_hi, Zeff_im_lo,
-                deff.x, deff.y, deff.z, deff.w,
-            );
-            // Multiply by 2 (exact)
-            let t1 = vec4<f32>(2.0 * t1_dsc_unscaled.x, 2.0 * t1_dsc_unscaled.y,
-                               2.0 * t1_dsc_unscaled.z, 2.0 * t1_dsc_unscaled.w);
-            let t1_e = dn_e;
-
-            // Term 2: δ_eff² (DS complex square).
-            let t2 = dsc_sq(deff.x, deff.y, deff.z, deff.w);
-            let t2_e = 2 * dn_e;
-
-            // Sum terms (with or without δ_c).
-            var e_new: i32;
             var sum: vec4<f32>;
-            if is_julia {
-                e_new = max(t1_e, t2_e);
-                let s1 = dsc_ldexp(t1, t1_e - e_new);
-                let s2 = dsc_ldexp(t2, t2_e - e_new);
-                sum = dsc_add(s1, s2);
+            var e_new: i32;
+            if ft == 3u {
+                // Multibrot z^d + c: δ' = Σ_{k=1..d} C(d,k)·Z^(d-k)·δ^k (+ δc).
+                // δ^k carries exponent k·dn_e; terms are aligned to the largest.
+                var zpow: array<vec4<f32>, 12>;
+                zpow[0] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+                for (var j: u32 = 1u; j < mb_d; j++) {
+                    let a = zpow[j - 1u];
+                    zpow[j] = dsc_mul(a.x, a.y, a.z, a.w, Zn_re_hi, Zn_re_lo, Zn_im_hi, Zn_im_lo);
+                }
+                var dk = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+                var dk_e: i32 = 0;
+                var binom: f32 = 1.0;
+                var acc = vec4<f32>(0.0);
+                var acc_e: i32 = 0;
+                var have = false;
+                for (var k: u32 = 1u; k <= mb_d; k++) {
+                    dk = dsc_mul(dk.x, dk.y, dk.z, dk.w, dn.x, dn.y, dn.z, dn.w);
+                    dk_e = dk_e + dn_e;
+                    let sh = dsc_renorm_shift(dk);
+                    dk = dsc_ldexp(dk, sh);
+                    dk_e = dk_e - sh;
+                    binom = binom * f32(mb_d - k + 1u) / f32(k);
+                    let zp = zpow[mb_d - k];
+                    var term = dsc_mul(zp.x, zp.y, zp.z, zp.w, dk.x, dk.y, dk.z, dk.w);
+                    term = dsc_mul(binom, 0.0, 0.0, 0.0, term.x, term.y, term.z, term.w);
+                    if !have {
+                        acc = term; acc_e = dk_e; have = true;
+                    } else if dk_e > acc_e {
+                        acc = dsc_add(dsc_ldexp(acc, max(acc_e - dk_e, -200)), term); acc_e = dk_e;
+                    } else {
+                        acc = dsc_add(acc, dsc_ldexp(term, max(dk_e - acc_e, -200)));
+                    }
+                }
+                if !is_julia {
+                    if dc_e > acc_e {
+                        acc = dsc_add(dsc_ldexp(acc, max(acc_e - dc_e, -200)), dc); acc_e = dc_e;
+                    } else {
+                        acc = dsc_add(acc, dsc_ldexp(dc, max(dc_e - acc_e, -200)));
+                    }
+                }
+                sum = acc;
+                e_new = acc_e;
             } else {
-                e_new = max(t1_e, max(t2_e, dc_e));
-                let s1 = dsc_ldexp(t1, t1_e - e_new);
-                let s2 = dsc_ldexp(t2, t2_e - e_new);
-                let s3 = dsc_ldexp(dc, dc_e - e_new);
-                sum = dsc_add(dsc_add(s1, s2), s3);
-            }
+                // ── Pre-square modification on Z and δ ──────────────────
+                // For Burning Ship and Tricorn, modify the operands by sign/conjugation.
+                // δ pre-mods are applied to the mantissa (dn) directly.
+                var Zeff_re_hi = Zn_re_hi;
+                var Zeff_im_hi = Zn_im_hi;
+                var Zeff_re_lo = Zn_re_lo;
+                var Zeff_im_lo = Zn_im_lo;
+                var deff = dn;
 
-            // Post-square modification (sign flips for Celtic/Perpendicular/Buffalo).
-            if ft == 8u {
-                let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
-                let s = signf(Zsq_re);
-                sum = vec4<f32>(s * sum.x, s * sum.y, sum.z, sum.w);
-            } else if ft == 9u {
-                let s = -signf(Zn_re_hi);
-                sum = vec4<f32>(sum.x, sum.y, s * sum.z, s * sum.w);
-            } else if ft == 10u {
-                let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
-                let Zsq_im = 2.0 * Zn_re_hi * Zn_im_hi;
-                let sr = signf(Zsq_re);
-                let si = -signf(Zsq_im);
-                sum = vec4<f32>(sr * sum.x, sr * sum.y, si * sum.z, si * sum.w);
-            }
+                if ft == 2u {
+                    // Burning Ship: sign of FULL z (not just reference Z) — needed near fold lines.
+                    let dn_re_real = ldexp(dn.x, dn_e);
+                    let dn_im_real = ldexp(dn.z, dn_e);
+                    let sr = signf(Zn_re_hi + dn_re_real);
+                    let si = signf(Zn_im_hi + dn_im_real);
+                    Zeff_re_hi = sr * Zn_re_hi;
+                    Zeff_im_hi = si * Zn_im_hi;
+                    Zeff_re_lo = sr * Zn_re_lo;
+                    Zeff_im_lo = si * Zn_im_lo;
+                    deff = vec4<f32>(sr * dn.x, sr * dn.y, si * dn.z, si * dn.w);
+                } else if ft == 7u {
+                    // Tricorn: Z_eff = conj(Z), δ_eff = conj(δ) — negate imag parts.
+                    Zeff_im_hi = -Zn_im_hi;
+                    Zeff_im_lo = -Zn_im_lo;
+                    deff = vec4<f32>(dn.x, dn.y, -dn.z, -dn.w);
+                }
 
+                // Term 1: 2·Z_eff·δ_eff (DS×DS complex multiply).
+                let t1_dsc_unscaled = dsc_mul(
+                    Zeff_re_hi, Zeff_re_lo, Zeff_im_hi, Zeff_im_lo,
+                    deff.x, deff.y, deff.z, deff.w,
+                );
+                // Multiply by 2 (exact)
+                let t1 = vec4<f32>(2.0 * t1_dsc_unscaled.x, 2.0 * t1_dsc_unscaled.y,
+                                   2.0 * t1_dsc_unscaled.z, 2.0 * t1_dsc_unscaled.w);
+                let t1_e = dn_e;
+
+                // Term 2: δ_eff² (DS complex square).
+                let t2 = dsc_sq(deff.x, deff.y, deff.z, deff.w);
+                let t2_e = 2 * dn_e;
+
+                // Sum terms (with or without δ_c).
+                if is_julia {
+                    e_new = max(t1_e, t2_e);
+                    let s1 = dsc_ldexp(t1, t1_e - e_new);
+                    let s2 = dsc_ldexp(t2, t2_e - e_new);
+                    sum = dsc_add(s1, s2);
+                } else {
+                    e_new = max(t1_e, max(t2_e, dc_e));
+                    let s1 = dsc_ldexp(t1, t1_e - e_new);
+                    let s2 = dsc_ldexp(t2, t2_e - e_new);
+                    let s3 = dsc_ldexp(dc, dc_e - e_new);
+                    sum = dsc_add(dsc_add(s1, s2), s3);
+                }
+
+                // Post-square modification (sign flips for Celtic/Perpendicular/Buffalo).
+                if ft == 8u {
+                    let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
+                    let s = signf(Zsq_re);
+                    sum = vec4<f32>(s * sum.x, s * sum.y, sum.z, sum.w);
+                } else if ft == 9u {
+                    let s = -signf(Zn_re_hi);
+                    sum = vec4<f32>(sum.x, sum.y, s * sum.z, s * sum.w);
+                } else if ft == 10u {
+                    let Zsq_re = Zn_re_hi * Zn_re_hi - Zn_im_hi * Zn_im_hi;
+                    let Zsq_im = 2.0 * Zn_re_hi * Zn_im_hi;
+                    let sr = signf(Zsq_re);
+                    let si = -signf(Zsq_im);
+                    sum = vec4<f32>(sr * sum.x, sr * sum.y, si * sum.z, si * sum.w);
+                }
+            }
             dn = sum;
             dn_e = e_new;
             // Renormalize mantissa.
@@ -617,7 +670,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let m2 = dot(z_final, z_final);
         let log_zn = log2(m2) * 0.5;
-        smooth_val = f32(iter) + 1.0 - log2(log_zn);
+        if ft == 3u {
+            // iter - 1 - log_d(log2|z| / 4): equals the z^2 formula at d = 2 and keeps
+            // fract() wrapping exactly where the escape count steps (escape at |z| = 16)
+            smooth_val = f32(iter) - 1.0 - log2(log_zn * 0.25) / log2(f32(mb_d));
+        } else {
+            smooth_val = f32(iter) + 1.0 - log2(log_zn);
+        }
     } else {
         smooth_val = f32(max_i);
     }

@@ -924,7 +924,9 @@ pub fn compute_variant_reference_orbit(
     pixel_step: f64,
     fractal_type: FractalType,
     julia_c: Option<(f64, f64)>,
+    power: f32,
 ) -> PerturbData {
+    let mb_d = (power.round() as u32).clamp(2, 12);
     let zoom_digits = if pixel_step > 0.0 {
         (-pixel_step.log10()).max(16.0) as u32
     } else {
@@ -1016,6 +1018,21 @@ pub fn compute_variant_reference_orbit(
                     z_im.neg_assign();
                 }
                 z_im += &c_im;
+            }
+            FractalType::Multibrot => {
+                // z = z^d + c, integer d by repeated complex multiplication
+                let mut pr = z_re.clone();
+                let mut pi = z_im.clone();
+                for _ in 1..mb_d {
+                    zr2.assign(&pr * &z_re);
+                    zi2.assign(&pi * &z_im);
+                    zri.assign(&pr * &z_im);
+                    let t = Float::with_val(precision, &pi * &z_re);
+                    pr.assign(&zr2 - &zi2);
+                    pi.assign(&zri + &t);
+                }
+                z_re.assign(&pr + &c_re);
+                z_im.assign(&pi + &c_im);
             }
             FractalType::Buffalo => {
                 // |Re(z²)|, -|Im(z²)|

@@ -765,7 +765,8 @@ impl GpuState {
         // Determine if we should use perturbation (all escape-time z²+c types at deep zoom)
         let pixel_step = params.pixel_step_x(self.display_width);
         let use_perturb = params.fractal_type.is_escape_time()
-            && params.fractal_type != crate::fractals::FractalType::Multibrot
+            && (params.fractal_type != crate::fractals::FractalType::Multibrot
+                || (params.power - params.power.round()).abs() < 1e-4)
             && pixel_step < 1e-7;
         self.using_perturbation = use_perturb;
 
@@ -866,7 +867,7 @@ impl GpuState {
                     let perturb_data = crate::fractals::compute_variant_reference_orbit(
                         &params.center_re, &params.center_im,
                         params.max_iter, pixel_step,
-                        params.fractal_type, julia_c,
+                        params.fractal_type, julia_c, params.power,
                     );
                     self.queue.write_buffer(
                         &self.ref_orbit_buffer,
