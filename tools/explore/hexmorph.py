@@ -8,6 +8,7 @@ zone should get a 2q-fold ring (q = 3 -> hexagon) between its own halo and the i
    spanning its size up to the branch point's feature scale.
 
 Usage: hexmorph.py cre cim period out_dir [--q 3] [--n 6] [--width-k 200] [--seed 0]
+       period 0 = plain-set region of width --width-k centred at cre, cim (no inherited rings)
 Writes out_dir/candidates.jsonl and out_dir/<id>_w<j>.png (smooth, for symmetry measurement).
 """
 import json
@@ -111,9 +112,14 @@ def main():
     rng = np.random.default_rng(arg("--seed", 0))
     bits = morph.prec_for(1e-30)
     gmpy2.get_context().precision = bits
-    N0 = morph.nucleus(morph.mpc_s(cre, cim, bits), p0, bits)
-    s0 = morph.mini_size(N0, p0, bits)
-    W = s0 * wk
+    if p0 > 0:
+        N0 = morph.nucleus(morph.mpc_s(cre, cim, bits), p0, bits)
+        s0 = morph.mini_size(N0, p0, bits)
+        W = s0 * wk
+    else:
+        # plain-set region: period 0, --width-k is the region width itself
+        N0 = morph.mpc_s(cre, cim, bits)
+        W = wk
     bits = morph.prec_for(W * 1e-14)
     gmpy2.get_context().precision = bits
     it = int(min(80000, 40 * p0 + 4000))
@@ -158,7 +164,7 @@ def main():
         digits = int(morph.prec_for(s * 1e-4) * 0.302) + 2
         c = dict(type="mandelbrot", cre=format(N.real, f".{digits}e"), cim=format(N.imag, f".{digits}e"),
                  period=per, mini_size=s, q=q, parent=p0, feat=feat, dist_over_feat=dist / feat,
-                 iters=int(min(400000, 60 * per + 20000)), julia=None, id=f"hx{p0}_q{q}_p{per}_{x}_{y}")
+                 iters=int(min(400000, 60 * per + 20000)), julia=None, id=f"hx{p0 or 'r'}_q{q}_p{per}_{x}_{y}")
         # The 2q-fold ring (spiral clusters around the minibrot) shows ~60% of the way up the log
         # range from 10x its size to the branch feature scale (6-fold star below, the plain branch above).
         lo, hi = math.log(s * 10), math.log(feat * 2)
