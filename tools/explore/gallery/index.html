@@ -112,7 +112,7 @@ function depth(z) {
   return `${m.toFixed(1)}×10${sup(e)}`;
 }
 function coord(it) {
-  const re = Number(it.cre), im = -Number(it.cim);
+  const re = Number(it.cre), im = it.orient === "std" ? Number(it.cim) : -Number(it.cim);
   const f = (v) => v.toPrecision(10);
   return `${f(re)} ${im < 0 ? "−" : "+"} ${f(Math.abs(im))}i`;
 }

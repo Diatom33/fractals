@@ -15,6 +15,10 @@ TYPE_FLAG = {"mandelbrot": "mandelbrot", "julia": "julia", "burningship": "burni
 
 
 def render_cand(c, out, palette, w, h, extra=(), pparam=None, iters=None):
+    # "palette@param" selects a palette slider value, e.g. "inverted@0.15"
+    if "@" in palette:
+        palette, v = palette.split("@", 1)
+        pparam = float(v)
     return fr.render(out, type=TYPE_FLAG[c["type"]], palette=palette, cre=c["cre"], cim=c["cim"],
                      zoom=c["zoom"], iters=iters or c["iters"], w=w, h=h,
                      julia=c.get("julia"), extra=extra, pparam=pparam)
