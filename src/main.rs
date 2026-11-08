@@ -431,6 +431,7 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
                 "lichtenberg" | "lightning" => fractals::ColorPalette::Lichtenberg,
                 "corona" | "filament" => fractals::ColorPalette::Corona,
                 "slotcanyon" | "slot-canyon" | "canyon" => fractals::ColorPalette::SlotCanyon,
+                "glade" => fractals::ColorPalette::Glade,
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();

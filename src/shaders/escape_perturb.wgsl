@@ -206,6 +206,15 @@ fn aux_mode() -> u32 {
     return 2u;
 }
 
+// Glade (16) also keeps a bokeh signal in orbit_traps.w: the canopy trap
+// intensity exp(-d * scale) as a decaying running max over the orbit, so only
+// the last stretch before escape counts (pixel-specific at any depth, unlike
+// a whole-orbit min that saturates once orbits get long). The integer part
+// stores which of the four traps lit it.
+fn glade_decay() -> f32 {
+    return exp2(-1.0 / max(params.coloring_param_2, 1.0));
+}
+
 fn stripe_k() -> f32 {
     switch params.palette {
         case 12u, 13u: { return params.coloring_param; }
@@ -286,6 +295,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var stripe_last: f32 = 0.0;
     var exp_sum: f32 = 0.0;
     var aux_n: f32 = 0.0;
+    let glade = params.palette == 16u;
+    let gdecay = glade_decay();
+    var bokeh: f32 = 0.0;
+    var bokeh_k: f32 = 0.0;
 
     var iter: u32 = max_i;
     var ref_i: u32 = 0u;
@@ -514,6 +527,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 stripe_sum += s;
                 exp_sum += exp(-length(z_full));
                 aux_n += 1.0;
+                if glade {
+                    let d0 = length(z_full - trap0);
+                    let d1 = length(z_full - trap1);
+                    let d2 = length(z_full - trap2);
+                    let d3 = length(z_full - trap3);
+                    var dk = d0; var kk = 0.0;
+                    if d1 < dk { dk = d1; kk = 1.0; }
+                    if d2 < dk { dk = d2; kk = 2.0; }
+                    if d3 < dk { dk = d3; kk = 3.0; }
+                    let inten = exp(-dk * params.coloring_param);
+                    bokeh *= gdecay;
+                    if inten > bokeh { bokeh = inten; bokeh_k = kk; }
+                }
             }
         }
 
@@ -628,7 +654,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let n_eff = max(aux_n, 1.0);
         let avg = stripe_sum / n_eff;
         let prev = select(avg, (stripe_sum - stripe_last) / max(n_eff - 1.0, 1.0), aux_n > 1.5);
-        orbit_traps[idx] = vec4<f32>(avg, prev, exp_sum / n_eff, 0.0);
+        orbit_traps[idx] = vec4<f32>(avg, prev, exp_sum / n_eff, bokeh_k + min(bokeh, 0.999));
     } else {
         orbit_traps[idx] = trap_min;
     }

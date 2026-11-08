@@ -669,7 +669,7 @@ fn palette_obsidian(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32)
 // Palette 12: Noctilucent — night-shining clouds. Stripe-average wisps in
 // electric silver-blue drift over a deep twilight sky, with a faint cold
 // sheen where the set boundary approaches.
-fn palette_noctilucent(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, idx: u32) -> vec3<f32> {
+fn palette_noctilucent(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
     let contrast = max(params.coloring_param_2, 0.1);
     let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
     let log_iter = log2(smooth_iter + 1.0);
@@ -689,6 +689,10 @@ fn palette_noctilucent(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, idx: u32) -
     );
     var col = sky + cloud * wisp * 0.9;
     if dz_available(dz_log2) {
+        // moderate relief: a high sun embosses the cloud field without going harsh
+        let shade = relief_shade(z, dz_angle, 2.0, 1.4);
+        col *= 0.55 + 0.6 * shade;
+        col += cloud * pow(shade, 14.0) * wisp * 0.25;
         let de = de_px(z, dz_log2);
         col += vec3<f32>(0.35, 0.55, 0.90) * exp(-de / 3.0) * 0.5;
     }
@@ -773,6 +777,56 @@ fn palette_slot_canyon(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f
     return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// Palette 16: Glade — Canopy's jewel bokeh, rebuilt to hold structure across
+// scales. A violet night sky embossed by the relief normal (smooth at any
+// depth) instead of Canopy's flat iteration-tinted murk; foliage light hugging
+// the set at a zoom-invariant pixel width (distance estimation) with leaf
+// veining from the stripe average; faint distance shells so far exterior
+// still reads as layered depth; and bokeh from a decaying running max of the
+// canopy traps (orbit_traps.w), so highlights stay sparse and pixel-specific
+// at deep zooms where Canopy's whole-orbit trap minimum saturates.
+fn palette_glade(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let aux = orbit_traps[idx];
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    let k = floor(aux.w);
+    let b = clamp(aux.w - k, 0.0, 1.0);
+
+    // night sky, breathing slowly between indigo and plum with depth
+    let breathe = 0.5 + 0.5 * cos(log_iter * 0.21);
+    let sky_lo = mix(vec3<f32>(0.020, 0.016, 0.060), vec3<f32>(0.040, 0.014, 0.060), breathe);
+    let sky_hi = mix(vec3<f32>(0.120, 0.090, 0.260), vec3<f32>(0.200, 0.090, 0.240), breathe);
+    var col = sky_lo;
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, 2.3, 1.1);
+        col = mix(sky_lo, sky_hi, shade * shade);
+        let de_l = de_log2_px(z, dz_log2);
+        let de = exp2(clamp(de_l, -20.0, 24.0));
+        // distance shells: nested bands one octave of DE apart
+        col *= 0.82 + 0.18 * (0.5 + 0.5 * cos(de_l * 2.0));
+        // foliage light around the set, veined by the stripe field
+        // (narrow, and modulated by relief and veining, so dense regions keep
+        // texture instead of clipping to a flat glow)
+        let near = exp(-de / 3.0);
+        let leaf = mix(vec3<f32>(0.16, 0.48, 0.58), vec3<f32>(0.62, 0.50, 0.92), smoothstep(0.2, 0.8, s));
+        col += leaf * near * (0.15 + 0.85 * s) * (0.35 + 0.65 * shade) * 0.7;
+        // sunlit leaf edges: relief highlight only near the set
+        col += vec3<f32>(0.85, 0.80, 1.00) * pow(shade, 12.0) * near * 0.30;
+        // fine boundary sparkle
+        col += vec3<f32>(0.92, 0.88, 1.00) * exp(-de / 0.9) * 0.30;
+    }
+    // jewel bokeh (amber, rose, cyan, lavender: no red/green pairing)
+    var jewel = vec3<f32>(1.00, 0.68, 0.24);
+    if k > 0.5 { jewel = vec3<f32>(1.00, 0.42, 0.62); }
+    if k > 1.5 { jewel = vec3<f32>(0.36, 0.84, 1.00); }
+    if k > 2.5 { jewel = vec3<f32>(0.78, 0.62, 1.00); }
+    let glow = pow(smoothstep(0.12, 1.0, b), 1.5);
+    col += jewel * glow * 1.1 + vec3<f32>(1.0, 0.97, 0.92) * pow(b, 8.0) * 0.5;
+    let max_ch = max(col.x, max(col.y, col.z));
+    col = select(col, col / max_ch, max_ch > 1.0);
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 // ── Interior coloring (palettes 11+) ────────────────────────────────────────
 // Classic palettes keep pure-black interiors. The new palettes read the
 // interior field — the orbit-average of exp(-|z|), a smooth bounded value
@@ -807,6 +861,10 @@ fn interior_color(z: vec2<f32>, idx: u32) -> vec3<f32> {
             // deep canyon shadow, faintly warm
             return vec3<f32>(0.050, 0.020, 0.012) * (0.4 + 0.6 * f);
         }
+        case 16u: {
+            // shadowed undergrowth, faint violet
+            return vec3<f32>(0.010, 0.006, 0.024) + vec3<f32>(0.030, 0.018, 0.060) * smoothstep(0.2, 0.9, f);
+        }
         default: { return vec3<f32>(0.0); }
     }
 }
@@ -825,10 +883,11 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, px:
         case 9u: { return palette_steve(smooth_iter, z, dz_log2, dz_angle, px, py, sample_base); }
         case 10u: { return palette_inverted_pair(smooth_iter); }
         case 11u: { return palette_obsidian(smooth_iter, z, dz_log2, dz_angle); }
-        case 12u: { return palette_noctilucent(smooth_iter, z, dz_log2, py * params.stride + px); }
+        case 12u: { return palette_noctilucent(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         case 13u: { return palette_lichtenberg(smooth_iter, z, dz_log2, py * params.stride + px); }
         case 14u: { return palette_corona(smooth_iter, z, dz_log2); }
         case 15u: { return palette_slot_canyon(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
+        case 16u: { return palette_glade(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         default: { return palette_classic(smooth_iter); }
     }
 }

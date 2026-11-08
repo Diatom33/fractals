@@ -220,6 +220,7 @@ pub enum ColorPalette {
     Lichtenberg,      // 13: Fossilized lightning — stripe filaments + DE trunk
     Corona,           // 14: Zoom-invariant neon plasma filament (pure DE)
     SlotCanyon,       // 15: Relief-lit sandstone strata with crevice occlusion
+    Glade,            // 16: Canopy-style jewel bokeh over relief-lit violet night + DE foliage
 }
 
 impl ColorPalette {
@@ -240,6 +241,7 @@ impl ColorPalette {
         ColorPalette::Lichtenberg,
         ColorPalette::Corona,
         ColorPalette::SlotCanyon,
+        ColorPalette::Glade,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -260,6 +262,7 @@ impl ColorPalette {
             ColorPalette::Lichtenberg => "Lichtenberg",
             ColorPalette::Corona => "Corona",
             ColorPalette::SlotCanyon => "Slot Canyon",
+            ColorPalette::Glade => "Glade",
         }
     }
 
@@ -281,6 +284,7 @@ impl ColorPalette {
             ColorPalette::Lichtenberg => 13,
             ColorPalette::Corona => 14,
             ColorPalette::SlotCanyon => 15,
+            ColorPalette::Glade => 16,
         }
     }
 
@@ -299,6 +303,7 @@ impl ColorPalette {
             ColorPalette::Lichtenberg => 6.0,  // branch density (stripe frequency)
             ColorPalette::Corona => 3.0,       // filament width (pixels)
             ColorPalette::SlotCanyon => 4.2,   // light azimuth (radians)
+            ColorPalette::Glade => 4.0,        // bokeh trap scale
             _ => 0.0,
         }
     }
@@ -322,6 +327,7 @@ impl ColorPalette {
                 | ColorPalette::Lichtenberg
                 | ColorPalette::Corona
                 | ColorPalette::SlotCanyon
+                | ColorPalette::Glade
         )
     }
 
@@ -348,6 +354,7 @@ impl ColorPalette {
             ColorPalette::Lichtenberg => "Branch density",
             ColorPalette::Corona => "Filament width",
             ColorPalette::SlotCanyon => "Light azimuth",
+            ColorPalette::Glade => "Bokeh scale",
             _ => "",
         }
     }
@@ -361,6 +368,7 @@ impl ColorPalette {
             ColorPalette::Lichtenberg => 10.0, // filament sharpness
             ColorPalette::Corona => 0.12,      // hue drift rate
             ColorPalette::SlotCanyon => 4.0,   // strata density (stripe frequency)
+            ColorPalette::Glade => 24.0,       // bokeh memory (iterations, half-life)
             _ => 0.0,
         }
     }
@@ -375,6 +383,7 @@ impl ColorPalette {
                 | ColorPalette::Lichtenberg
                 | ColorPalette::Corona
                 | ColorPalette::SlotCanyon
+                | ColorPalette::Glade
         )
     }
 
@@ -387,6 +396,7 @@ impl ColorPalette {
             ColorPalette::Lichtenberg => "Filament sharpness",
             ColorPalette::Corona => "Hue drift",
             ColorPalette::SlotCanyon => "Strata density",
+            ColorPalette::Glade => "Bokeh memory",
             _ => "",
         }
     }

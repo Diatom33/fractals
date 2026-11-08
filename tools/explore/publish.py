@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from emptiness import is_empty
 from screen import render_cand
 
 GAL = Path(__file__).resolve().parent / "gallery"
@@ -38,6 +39,10 @@ def main():
             im.save(big, quality=90)
             im.resize((800, 600), Image.LANCZOS).save(thumb, quality=86)
         if key in have:
+            continue
+        empty, cov, center = is_empty(big)
+        if empty and not p.get("force"):
+            print(f"SKIP {key}: mostly empty (coverage {cov:.2f}, center {center:.2f})", flush=True)
             continue
         rnd["items"].append({
             "id": key, "src": f"img/{key}.jpg", "thumb": f"img/t_{key}.jpg",

@@ -406,6 +406,7 @@ impl eframe::App for FractalApp {
                                 crate::fractals::ColorPalette::Noctilucent => 0.5..=16.0,
                                 crate::fractals::ColorPalette::Lichtenberg => 0.5..=20.0,
                                 crate::fractals::ColorPalette::Corona => 0.5..=16.0,
+                                crate::fractals::ColorPalette::Glade => 0.5..=16.0,
                                 _ => 0.0..=1.0,
                             };
                             let step = match self.params.palette {
@@ -432,6 +433,7 @@ impl eframe::App for FractalApp {
                                 crate::fractals::ColorPalette::Lichtenberg => 2.0..=40.0,
                                 crate::fractals::ColorPalette::Corona => 0.0..=0.6,
                                 crate::fractals::ColorPalette::SlotCanyon => 0.5..=16.0,
+                                crate::fractals::ColorPalette::Glade => 2.0..=200.0,
                                 _ => 0.0..=1.0,
                             };
                             let step2 = match self.params.palette {
