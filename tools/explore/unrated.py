@@ -8,8 +8,13 @@ import sys
 from pathlib import Path
 
 GAL = Path(__file__).resolve().parent / "gallery" / "gallery.json"
-rd = Path(sys.argv[1]) / "ratings"
-rated = {p.stem for p in rd.glob("*.json") if json.load(open(p)).get("r")}
+# ArtifactData out_dir dumps land in <dir>/ratings/, but hand-written dumps may sit in <dir> itself
+docs = {}
+for p in list((Path(sys.argv[1]) / "ratings").glob("*.json")) + list(Path(sys.argv[1]).glob("*.json")):
+    d = json.load(open(p))
+    if p.stem not in docs or d.get("t", 0) > docs[p.stem].get("t", 0):
+        docs[p.stem] = d
+rated = {k for k, d in docs.items() if d.get("r")}
 g = json.load(open(GAL))
 missing = [(r["title"], it["id"]) for r in g["rounds"] for it in r["items"] if it["id"] not in rated]
 total = sum(len(r["items"]) for r in g["rounds"])
