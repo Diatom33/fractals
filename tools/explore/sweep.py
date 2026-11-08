@@ -17,14 +17,18 @@ SWEEP = ["biolum", "canopy", "obsidian", "corona", "lichtenberg", "noctilucent",
 
 def main():
     rd = Path(sys.argv[1])
-    ids = sys.argv[2:]
+    ids = [a for a in sys.argv[2:] if not a.startswith("--")]
+    pal = SWEEP
+    for a in sys.argv[2:]:
+        if a.startswith("--palettes="):
+            pal = a.split("=", 1)[1].split(",")
     cands = {c["id"]: c for c in map(json.loads, open(rd / "candidates.jsonl"))}
     for cid in ids:
         c = cands[cid]
         od = rd / "sweep" / cid
         od.mkdir(parents=True, exist_ok=True)
         paths = []
-        for p in SWEEP:
+        for p in pal:
             out = od / f"{p}.png"
             try:
                 if not out.exists():
@@ -33,7 +37,7 @@ def main():
             except Exception as e:
                 print("FAIL", cid, p, str(e)[:160], flush=True)
         fr.contact_sheet(paths, rd / "sweep" / f"{cid}.jpg", labels=[f"{cid} {x.stem}" for x in paths],
-                         cols=4, tile=(400, 300))
+                         cols=4 if len(pal) > 6 else 3, tile=(400, 300))
         print("swept", cid, flush=True)
 
 
