@@ -432,6 +432,11 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
                 "corona" | "filament" => fractals::ColorPalette::Corona,
                 "slotcanyon" | "slot-canyon" | "canyon" => fractals::ColorPalette::SlotCanyon,
                 "glade" => fractals::ColorPalette::Glade,
+                "lantern" => fractals::ColorPalette::Lantern,
+                "hoarfrost" => fractals::ColorPalette::Hoarfrost,
+                "kintsugi" => fractals::ColorPalette::Kintsugi,
+                "halo" => fractals::ColorPalette::Halo,
+                "abyssal" => fractals::ColorPalette::Abyssal,
                 _ => fractals::ColorPalette::Classic,
             };
             params.coloring_param = params.palette.default_param();

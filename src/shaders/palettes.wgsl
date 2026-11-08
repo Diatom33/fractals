@@ -844,6 +844,176 @@ fn palette_glade(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, id
     return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// ── Shared bokeh read for palettes 17+ (same signal and fixes as Glade) ───────
+// orbit_traps.w = brightest trap (index + decaying-max intensity); .z = runner-up
+// for escaped pixels. decay^fract(smooth_iter) finishes the last partial decay
+// step so the glow has no iteration rings.
+struct Bokeh { k1: f32, b1: f32, k2: f32, b2: f32 }
+
+fn bokeh_read(idx: u32, smooth_iter: f32) -> Bokeh {
+    let aux = orbit_traps[idx];
+    let decay = exp2(-1.0 / max(params.coloring_param_2, 1.0));
+    let dfrac = pow(decay, fract(smooth_iter));
+    let k1 = floor(aux.w);
+    let k2 = floor(aux.z);
+    return Bokeh(k1, clamp(aux.w - k1, 0.0, 1.0) * dfrac, k2, clamp(aux.z - k2, 0.0, 1.0) * dfrac);
+}
+
+// Weighted blend of two jewel colors (no hue seam where the brightest trap changes).
+fn bokeh_mix(bk: Bokeh, j0: vec3<f32>, j1: vec3<f32>, j2: vec3<f32>, j3: vec3<f32>) -> vec3<f32> {
+    var a = j0; if bk.k1 > 0.5 { a = j1; } if bk.k1 > 1.5 { a = j2; } if bk.k1 > 2.5 { a = j3; }
+    var c = j0; if bk.k2 > 0.5 { c = j1; } if bk.k2 > 1.5 { c = j2; } if bk.k2 > 2.5 { c = j3; }
+    let w1 = bk.b1 * bk.b1 * bk.b1;
+    let w2 = bk.b2 * bk.b2 * bk.b2;
+    return (a * w1 + c * w2) / max(w1 + w2, 1e-12);
+}
+
+fn tone_fit(c: vec3<f32>) -> vec3<f32> {
+    let m = max(c.x, max(c.y, c.z));
+    return clamp(select(c, c / m, m > 1.0), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Palette 17: Lantern — Glade's warm sibling. Deep teal-black relief sky,
+// amber-to-rose filament light veined by the stripe field, lantern bokeh
+// (amber, coral, gold, peach).
+fn palette_lantern(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    let breathe = 0.5 + 0.5 * cos(log_iter * 0.19);
+    let sky_lo = mix(vec3<f32>(0.004, 0.024, 0.032), vec3<f32>(0.006, 0.020, 0.036), breathe);
+    let sky_hi = mix(vec3<f32>(0.020, 0.105, 0.125), vec3<f32>(0.025, 0.090, 0.130), breathe);
+    var col = sky_lo;
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, 2.6, 1.1);
+        col = mix(sky_lo, sky_hi, shade * shade);
+        let de_l = de_log2_px(z, dz_log2);
+        let de = exp2(clamp(de_l, -20.0, 24.0));
+        col *= 0.84 + 0.16 * (0.5 + 0.5 * cos(de_l * 2.0));
+        let near = exp(-de / 3.0);
+        col *= 1.0 - 0.6 * near;  // keep the teal sky from greying the amber
+        let leaf = mix(vec3<f32>(1.00, 0.58, 0.16), vec3<f32>(1.00, 0.40, 0.42), smoothstep(0.2, 0.8, s));
+        col += leaf * near * (0.15 + 0.85 * s) * (0.35 + 0.65 * shade) * 0.95;
+        col += vec3<f32>(1.00, 0.88, 0.70) * pow(shade, 12.0) * near * 0.30;
+        col += vec3<f32>(1.00, 0.93, 0.80) * exp(-de / 0.9) * 0.28;
+    }
+    let bk = bokeh_read(idx, smooth_iter);
+    let jewel = bokeh_mix(bk, vec3<f32>(1.00, 0.62, 0.20), vec3<f32>(1.00, 0.45, 0.38),
+                          vec3<f32>(1.00, 0.82, 0.35), vec3<f32>(1.00, 0.75, 0.62));
+    // higher threshold than Glade: faint amber haze over teal reads as mud
+    let glow = pow(smoothstep(0.30, 1.0, bk.b1), 1.7);
+    col += jewel * glow * 1.05 + vec3<f32>(1.0, 0.96, 0.88) * pow(bk.b1, 8.0) * 0.5;
+    return tone_fit(col);
+}
+
+// Palette 18: Hoarfrost — crisp ice-white filaments with faceted relief
+// highlights on blue-black slate, frost-flecked by tiny sparse sparkles
+// instead of big orbs.
+fn palette_hoarfrost(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    let sky_lo = vec3<f32>(0.010, 0.016, 0.034);
+    let sky_hi = mix(vec3<f32>(0.060, 0.090, 0.150), vec3<f32>(0.075, 0.085, 0.160), 0.5 + 0.5 * cos(log_iter * 0.17));
+    var col = sky_lo;
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, 1.9, 0.9);
+        col = mix(sky_lo, sky_hi, shade * shade);
+        let de_l = de_log2_px(z, dz_log2);
+        let de = exp2(clamp(de_l, -20.0, 24.0));
+        // pale frost halo, then a crisp white crystal core with faceted glints
+        let halo = exp(-de / 2.4);
+        col += vec3<f32>(0.45, 0.68, 0.92) * halo * (0.25 + 0.75 * s) * (0.4 + 0.6 * shade) * 0.55;
+        let core = exp(-de / 0.85);
+        col += vec3<f32>(0.90, 0.95, 1.00) * core * (0.55 + 0.45 * shade);
+        col += vec3<f32>(1.0) * pow(shade, 20.0) * halo * 0.45;
+    }
+    let bk = bokeh_read(idx, smooth_iter);
+    let fleck = pow(smoothstep(0.45, 1.0, bk.b1), 2.5);
+    let tint = bokeh_mix(bk, vec3<f32>(0.85, 0.95, 1.00), vec3<f32>(0.70, 0.88, 1.00),
+                         vec3<f32>(0.92, 0.90, 1.00), vec3<f32>(0.75, 1.00, 0.98));
+    col += tint * fleck * 0.9;
+    return tone_fit(col);
+}
+
+// Palette 19: Kintsugi — gold leaf on black lacquer. Metallic gold along the
+// set (relief-shaded for a hammered sheen), fine gold veins where the stripe
+// field crosses its midline, and a dark lacquer ground with a soft sheen.
+fn palette_kintsugi(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let azimuth = params.coloring_param;
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    var col = vec3<f32>(0.011, 0.008, 0.007) + vec3<f32>(0.004, 0.003, 0.002) * cos(log_iter * 0.3);
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, azimuth, 1.0);
+        // lacquer sheen
+        col += vec3<f32>(0.05, 0.035, 0.03) * shade * shade + vec3<f32>(0.20, 0.16, 0.12) * pow(shade, 40.0) * 0.3;
+        let de = de_px(z, dz_log2);
+        // gold veins in the ground, fading away from the set
+        let vein = pow(1.0 - abs(2.0 * s - 1.0), 26.0) * exp(-de / 22.0);
+        col += vec3<f32>(0.90, 0.68, 0.26) * vein * 0.5;
+        // gold leaf seam with metallic shading
+        let seam = exp(-de / 1.8);
+        let gold_lo = vec3<f32>(0.55, 0.36, 0.10);
+        let gold_hi = vec3<f32>(1.00, 0.86, 0.48);
+        col = mix(col, mix(gold_lo, gold_hi, shade), clamp(seam * 1.3, 0.0, 1.0));
+        col += vec3<f32>(1.0, 0.95, 0.80) * pow(shade, 16.0) * seam * 0.4;
+    }
+    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Palette 20: Halo — soft dawn light graded by distance from the set (pixel
+// units, so it never washes out with depth). Dense regions such as embedded
+// Julia sets keep every pixel near the boundary and glow as whole shapes,
+// while lone strands stay thin and faint; faint pearl bokeh.
+fn palette_halo(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    var col = vec3<f32>(0.030, 0.032, 0.090);
+    if dz_available(dz_log2) {
+        let de_l = clamp(de_log2_px(z, dz_log2), -4.0, 12.0);
+        // t = 1 at the boundary, 0 far away (about 2^9 px)
+        let t = 1.0 - smoothstep(-1.0, 9.0, de_l);
+        let indigo = vec3<f32>(0.035, 0.040, 0.110);
+        let violet = vec3<f32>(0.230, 0.140, 0.340);
+        let rose   = vec3<f32>(0.780, 0.420, 0.500);
+        let gold   = vec3<f32>(1.000, 0.860, 0.620);
+        let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+        col = mix(indigo, violet, smoothstep(0.0, 0.45, t));
+        col = mix(col, rose, smoothstep(0.40, 0.85, t) * 0.85);
+        col = mix(col, gold, smoothstep(0.90, 1.0, t) * (0.35 + 0.65 * s));
+        let shade = relief_shade(z, dz_angle, 2.2, 1.0);
+        col *= 0.50 + 0.65 * shade * shade;
+    }
+    let bk = bokeh_read(idx, smooth_iter);
+    let jewel = bokeh_mix(bk, vec3<f32>(1.00, 0.92, 0.80), vec3<f32>(1.00, 0.78, 0.82),
+                          vec3<f32>(0.85, 0.85, 1.00), vec3<f32>(1.00, 0.88, 0.95));
+    col += jewel * pow(smoothstep(0.25, 1.0, bk.b1), 1.8) * 0.45;
+    return tone_fit(col);
+}
+
+// Palette 21: Abyssal — bioluminescence rebuilt to be zoom-invariant. Navy
+// water with faint relief caustics, cyan-teal living filaments at constant
+// pixel width (param 1 at 0 => default width), drifting plankton bokeh.
+fn palette_abyssal(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, idx: u32) -> vec3<f32> {
+    let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
+    let log_iter = log2(smooth_iter + 1.0);
+    let water = mix(vec3<f32>(0.004, 0.012, 0.030), vec3<f32>(0.006, 0.020, 0.040), 0.5 + 0.5 * cos(log_iter * 0.23));
+    var col = water;
+    if dz_available(dz_log2) {
+        let shade = relief_shade(z, dz_angle, 1.4, 1.3);
+        col = water + vec3<f32>(0.010, 0.040, 0.070) * shade * shade;
+        let de = de_px(z, dz_log2);
+        let species = 0.5 + 0.5 * cos(log_iter * 0.4);
+        let emit = mix(vec3<f32>(0.10, 0.85, 0.75), vec3<f32>(0.20, 0.60, 1.00), species);
+        let near = exp(-de / 3.0);
+        col += emit * near * (0.15 + 0.85 * s) * (0.30 + 0.70 * shade) * 0.55;
+        col += emit * exp(-de / 1.1) * (0.40 + 0.60 * shade) * 0.45;
+        col += vec3<f32>(0.80, 1.00, 0.98) * exp(-de / 0.7) * 0.18;
+    }
+    let bk = bokeh_read(idx, smooth_iter);
+    let jewel = bokeh_mix(bk, vec3<f32>(0.30, 1.00, 0.80), vec3<f32>(0.35, 0.75, 1.00),
+                          vec3<f32>(0.55, 0.95, 1.00), vec3<f32>(0.45, 0.60, 1.00));
+    col += jewel * pow(smoothstep(0.2, 1.0, bk.b1), 1.8) * 0.85;
+    return tone_fit(col);
+}
+
 // ── Interior coloring (palettes 11+) ────────────────────────────────────────
 // Classic palettes keep pure-black interiors. The new palettes read the
 // interior field — the orbit-average of exp(-|z|), a smooth bounded value
@@ -882,6 +1052,11 @@ fn interior_color(z: vec2<f32>, idx: u32) -> vec3<f32> {
             // shadowed undergrowth, faint violet
             return vec3<f32>(0.010, 0.006, 0.024) + vec3<f32>(0.030, 0.018, 0.060) * smoothstep(0.2, 0.9, f);
         }
+        case 17u: { return vec3<f32>(0.006, 0.018, 0.020) + vec3<f32>(0.030, 0.050, 0.050) * smoothstep(0.2, 0.9, f); }
+        case 18u: { return vec3<f32>(0.006, 0.010, 0.022) + vec3<f32>(0.030, 0.045, 0.070) * smoothstep(0.2, 0.9, f); }
+        case 19u: { return vec3<f32>(0.010, 0.007, 0.006) + vec3<f32>(0.030, 0.020, 0.010) * f; }
+        case 20u: { return vec3<f32>(0.020, 0.018, 0.060) + vec3<f32>(0.040, 0.030, 0.080) * smoothstep(0.2, 0.9, f); }
+        case 21u: { return vec3<f32>(0.002, 0.006, 0.016) + vec3<f32>(0.010, 0.030, 0.050) * smoothstep(0.2, 0.9, f); }
         default: { return vec3<f32>(0.0); }
     }
 }
@@ -905,6 +1080,11 @@ fn escape_color(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, px:
         case 14u: { return palette_corona(smooth_iter, z, dz_log2); }
         case 15u: { return palette_slot_canyon(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         case 16u: { return palette_glade(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
+        case 17u: { return palette_lantern(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
+        case 18u: { return palette_hoarfrost(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
+        case 19u: { return palette_kintsugi(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
+        case 20u: { return palette_halo(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
+        case 21u: { return palette_abyssal(smooth_iter, z, dz_log2, dz_angle, py * params.stride + px); }
         default: { return palette_classic(smooth_iter); }
     }
 }

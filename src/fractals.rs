@@ -221,6 +221,11 @@ pub enum ColorPalette {
     Corona,           // 14: Zoom-invariant neon plasma filament (pure DE)
     SlotCanyon,       // 15: Relief-lit sandstone strata with crevice occlusion
     Glade,            // 16: Canopy-style jewel bokeh over relief-lit violet night + DE foliage
+    Lantern,          // 17: Canopy-style lantern bokeh over relief-lit teal night, warm DE filaments
+    Hoarfrost,        // 18: Ice-white DE filaments with faceted relief on slate, frost sparkles
+    Kintsugi,         // 19: Gold-leaf DE seams with metallic relief on black lacquer, stripe veins
+    Halo,             // 20: Dawn light graded by pixel-space distance; Julia-first soft shapes
+    Abyssal,          // 21: Zoom-invariant bioluminescence: cyan DE filaments, plankton bokeh
 }
 
 impl ColorPalette {
@@ -242,6 +247,11 @@ impl ColorPalette {
         ColorPalette::Corona,
         ColorPalette::SlotCanyon,
         ColorPalette::Glade,
+        ColorPalette::Lantern,
+        ColorPalette::Hoarfrost,
+        ColorPalette::Kintsugi,
+        ColorPalette::Halo,
+        ColorPalette::Abyssal,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -263,6 +273,11 @@ impl ColorPalette {
             ColorPalette::Corona => "Corona",
             ColorPalette::SlotCanyon => "Slot Canyon",
             ColorPalette::Glade => "Glade",
+            ColorPalette::Lantern => "Lantern",
+            ColorPalette::Hoarfrost => "Hoarfrost",
+            ColorPalette::Kintsugi => "Kintsugi",
+            ColorPalette::Halo => "Halo",
+            ColorPalette::Abyssal => "Abyssal",
         }
     }
 
@@ -285,6 +300,11 @@ impl ColorPalette {
             ColorPalette::Corona => 14,
             ColorPalette::SlotCanyon => 15,
             ColorPalette::Glade => 16,
+            ColorPalette::Lantern => 17,
+            ColorPalette::Hoarfrost => 18,
+            ColorPalette::Kintsugi => 19,
+            ColorPalette::Halo => 20,
+            ColorPalette::Abyssal => 21,
         }
     }
 
@@ -304,6 +324,11 @@ impl ColorPalette {
             ColorPalette::Corona => 3.0,       // filament width (pixels)
             ColorPalette::SlotCanyon => 4.2,   // light azimuth (radians)
             ColorPalette::Glade => 4.0,        // bokeh trap scale
+            ColorPalette::Lantern => 6.0,
+            ColorPalette::Hoarfrost => 9.0,
+            ColorPalette::Kintsugi => 2.2,
+            ColorPalette::Halo => 4.0,
+            ColorPalette::Abyssal => 5.0,
             _ => 0.0,
         }
     }
@@ -348,6 +373,11 @@ impl ColorPalette {
                 | ColorPalette::Corona
                 | ColorPalette::SlotCanyon
                 | ColorPalette::Glade
+                | ColorPalette::Lantern
+                | ColorPalette::Hoarfrost
+                | ColorPalette::Kintsugi
+                | ColorPalette::Halo
+                | ColorPalette::Abyssal
         )
     }
 
@@ -375,6 +405,11 @@ impl ColorPalette {
             ColorPalette::Corona => "Filament width",
             ColorPalette::SlotCanyon => "Light azimuth",
             ColorPalette::Glade => "Bokeh scale",
+            ColorPalette::Lantern => "Bokeh scale",
+            ColorPalette::Hoarfrost => "Sparkle scale",
+            ColorPalette::Kintsugi => "Light azimuth",
+            ColorPalette::Halo => "Bokeh scale",
+            ColorPalette::Abyssal => "Bokeh scale",
             _ => "",
         }
     }
@@ -389,6 +424,11 @@ impl ColorPalette {
             ColorPalette::Corona => 0.12,      // hue drift rate
             ColorPalette::SlotCanyon => 4.0,   // strata density (stripe frequency)
             ColorPalette::Glade => 24.0,       // bokeh memory (iterations, half-life)
+            ColorPalette::Lantern => 24.0,
+            ColorPalette::Hoarfrost => 16.0,
+            ColorPalette::Kintsugi => 6.0,
+            ColorPalette::Halo => 24.0,
+            ColorPalette::Abyssal => 24.0,
             _ => 0.0,
         }
     }
@@ -404,6 +444,11 @@ impl ColorPalette {
                 | ColorPalette::Corona
                 | ColorPalette::SlotCanyon
                 | ColorPalette::Glade
+                | ColorPalette::Lantern
+                | ColorPalette::Hoarfrost
+                | ColorPalette::Kintsugi
+                | ColorPalette::Halo
+                | ColorPalette::Abyssal
         )
     }
 
@@ -417,6 +462,11 @@ impl ColorPalette {
             ColorPalette::Corona => "Hue drift",
             ColorPalette::SlotCanyon => "Strata density",
             ColorPalette::Glade => "Bokeh memory",
+            ColorPalette::Lantern => "Bokeh memory",
+            ColorPalette::Hoarfrost => "Sparkle memory",
+            ColorPalette::Kintsugi => "Vein density",
+            ColorPalette::Halo => "Bokeh memory",
+            ColorPalette::Abyssal => "Bokeh memory",
             _ => "",
         }
     }

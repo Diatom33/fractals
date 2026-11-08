@@ -186,7 +186,7 @@ fn glade_decay() -> f32 {
 fn stripe_k() -> f32 {
     switch params.palette {
         case 12u, 13u: { return params.coloring_param; }
-        case 15u: { return params.coloring_param_2; }
+        case 15u, 19u: { return params.coloring_param_2; }
         default: { return 4.0; }
     }
 }
@@ -263,7 +263,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var stripe_last: f32 = 0.0;
     var exp_sum: f32 = 0.0;
     var aux_n: f32 = 0.0;
-    let glade = params.palette == 16u;
+    // Bokeh palettes: Glade 16, Lantern 17, Hoarfrost 18, Halo 20, Abyssal 21
+    let glade = params.palette == 16u || params.palette == 17u || params.palette == 18u || params.palette == 20u || params.palette == 21u;
     let gdecay = glade_decay();
     var gm = vec4<f32>(0.0);  // per-trap decaying max (Glade)
 
