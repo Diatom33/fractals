@@ -265,8 +265,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var aux_n: f32 = 0.0;
     let glade = params.palette == 16u;
     let gdecay = glade_decay();
-    var bokeh: f32 = 0.0;
-    var bokeh_k: f32 = 0.0;
+    var gm = vec4<f32>(0.0);  // per-trap decaying max (Glade)
 
     // Multibrot power (only used when fractal_type == 3).
     // Snap to integer when very close so integer powers use exact ds_cpow_int;
@@ -382,13 +381,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let d1 = length(z_pos - trap1);
                 let d2 = length(z_pos - trap2);
                 let d3 = length(z_pos - trap3);
-                var dk = d0; var kk = 0.0;
-                if d1 < dk { dk = d1; kk = 1.0; }
-                if d2 < dk { dk = d2; kk = 2.0; }
-                if d3 < dk { dk = d3; kk = 3.0; }
-                let inten = exp(-dk * params.coloring_param);
-                bokeh *= gdecay;
-                if inten > bokeh { bokeh = inten; bokeh_k = kk; }
+                let inten = exp(-vec4<f32>(d0, d1, d2, d3) * params.coloring_param);
+                gm = max(gm * gdecay, inten);
             }
         }
 
@@ -431,7 +425,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let n_eff = max(aux_n, 1.0);
         let avg = stripe_sum / n_eff;
         let prev = select(avg, (stripe_sum - stripe_last) / max(n_eff - 1.0, 1.0), aux_n > 1.5);
-        orbit_traps[idx] = vec4<f32>(avg, prev, exp_sum / n_eff, bokeh_k + min(bokeh, 0.999));
+        var aux_z = exp_sum / n_eff;
+        var aux_w = 0.0;
+        if glade {
+            // two brightest traps, packed as index + intensity; an escaped pixel
+            // never reads the interior field, so .z carries the runner-up there
+            var k1 = 0u;
+            for (var t = 1u; t < 4u; t++) { if gm[t] > gm[k1] { k1 = t; } }
+            var k2 = select(0u, 1u, k1 == 0u);
+            for (var t = 0u; t < 4u; t++) { if t != k1 && gm[t] > gm[k2] { k2 = t; } }
+            aux_w = f32(k1) + min(gm[k1], 0.999);
+            if iter < max_i { aux_z = f32(k2) + min(gm[k2], 0.999); }
+        }
+        orbit_traps[idx] = vec4<f32>(avg, prev, aux_z, aux_w);
     } else {
         orbit_traps[idx] = trap_min;
     }

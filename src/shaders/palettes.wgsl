@@ -777,6 +777,13 @@ fn palette_slot_canyon(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f
     return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn glade_jewel(k: f32) -> vec3<f32> {
+    if k > 2.5 { return vec3<f32>(0.78, 0.62, 1.00); }
+    if k > 1.5 { return vec3<f32>(0.36, 0.84, 1.00); }
+    if k > 0.5 { return vec3<f32>(1.00, 0.42, 0.62); }
+    return vec3<f32>(1.00, 0.68, 0.24);
+}
+
 // Palette 16: Glade — Canopy's jewel bokeh, rebuilt to hold structure across
 // scales. A violet night sky embossed by the relief normal (smooth at any
 // depth) instead of Canopy's flat iteration-tinted murk; foliage light hugging
@@ -790,7 +797,18 @@ fn palette_glade(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, id
     let s = clamp(stripe_value(idx, smooth_iter), 0.0, 1.0);
     let log_iter = log2(smooth_iter + 1.0);
     let k = floor(aux.w);
-    let b = clamp(aux.w - k, 0.0, 1.0);
+    // The running max decays once per whole iteration, so it steps by one
+    // decay factor wherever the escape count changes (visible rings). Finish
+    // the last partial step continuously: with escape at |z| = 16, fract of
+    // the smooth count wraps exactly at those steps, and decay^fract makes
+    // the two sides meet.
+    let decay = exp2(-1.0 / max(params.coloring_param_2, 1.0));
+    let dfrac = pow(decay, fract(smooth_iter));
+    let b = clamp(aux.w - k, 0.0, 1.0) * dfrac;
+    // runner-up trap (in .z for escaped pixels): blending the two jewel colors
+    // by weight removes the hard hue seam where the brightest trap changes
+    let k2 = floor(aux.z);
+    let b2 = clamp(aux.z - k2, 0.0, 1.0) * dfrac;
 
     // night sky, breathing slowly between indigo and plum with depth
     let breathe = 0.5 + 0.5 * cos(log_iter * 0.21);
@@ -816,10 +834,9 @@ fn palette_glade(smooth_iter: f32, z: vec2<f32>, dz_log2: f32, dz_angle: f32, id
         col += vec3<f32>(0.92, 0.88, 1.00) * exp(-de / 0.9) * 0.30;
     }
     // jewel bokeh (amber, rose, cyan, lavender: no red/green pairing)
-    var jewel = vec3<f32>(1.00, 0.68, 0.24);
-    if k > 0.5 { jewel = vec3<f32>(1.00, 0.42, 0.62); }
-    if k > 1.5 { jewel = vec3<f32>(0.36, 0.84, 1.00); }
-    if k > 2.5 { jewel = vec3<f32>(0.78, 0.62, 1.00); }
+    let w1 = b * b * b;
+    let w2 = b2 * b2 * b2;
+    let jewel = (glade_jewel(k) * w1 + glade_jewel(k2) * w2) / max(w1 + w2, 1e-12);
     let glow = pow(smoothstep(0.12, 1.0, b), 1.5);
     col += jewel * glow * 1.1 + vec3<f32>(1.0, 0.97, 0.92) * pow(b, 8.0) * 0.5;
     let max_ch = max(col.x, max(col.y, col.z));
