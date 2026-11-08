@@ -18,6 +18,9 @@ SWEEP = ["biolum", "canopy", "obsidian", "corona", "lichtenberg", "noctilucent",
 def main():
     rd = Path(sys.argv[1])
     ids = [a for a in sys.argv[2:] if not a.startswith("--")]
+    for a in sys.argv[2:]:
+        if a.startswith("--ids-file="):
+            ids += open(a.split("=", 1)[1]).read().split()
     pal = SWEEP
     for a in sys.argv[2:]:
         if a.startswith("--palettes="):

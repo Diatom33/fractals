@@ -111,6 +111,20 @@ def composition(S):
     k = len(sizes)
     size_range = float(np.log10(sizes.max() / sizes.min())) if k >= 2 else 0.0
     f_in = met["f_in"]
+    if MINIS:
+        # Visible-minibrot field: count islands big enough to read as
+        # minibrots at print size (>= 3 px at 160x120), want >= 5.
+        vis = sizes[sizes >= 3]
+        kv = len(vis)
+        vr = float(np.log10(vis.max() / vis.min())) if kv >= 2 else 0.0
+        s = min(kv, 14) * 1.0 + vr * 1.5
+        s += 1.0 if 0.02 < f_in < 0.25 else (-(f_in - 0.25) * 30 if f_in >= 0.25 else -2.0)
+        s -= max(0.0, met["noise"] - 0.35) * 10
+        s -= max(0.0, met["flat"] - 0.3) * 4
+        if kv < 5:
+            s -= 20
+        met.update(blobs=int(k), visible_minis=int(kv), size_range=round(vr, 2), comp=round(s, 2))
+        return s, met
     s = 0.0
     s += min(k, 8) * 0.5 + size_range * 1.0
     s += 1.5 if 0.02 < f_in < 0.3 else (-1.0 if f_in > 0.45 else 0.0)
@@ -170,7 +184,7 @@ def walk(args):
             if best is None or sc > best[0]:
                 best = (sc, cc, ww, met)
         sc, center, width, met = best
-        if sc < 4.0:
+        if sc < (8.0 if MINIS else 4.0):
             return None
         S = escape_grid(kind, center, width, 240, 180, it, jc)
         met = {**frame_metrics(S), **{k: met[k] for k in ("blobs", "size_range", "comp")}}
@@ -185,7 +199,8 @@ def walk(args):
                 iters=iters, julia=[jc.real, jc.imag] if jc is not None else None, metrics=met)
 
 
-COMPOSE = "--compose" in sys.argv
+COMPOSE = "--compose" in sys.argv or "--minis" in sys.argv
+MINIS = "--minis" in sys.argv
 
 
 def main():

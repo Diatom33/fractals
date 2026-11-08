@@ -47,6 +47,9 @@ figcaption { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; alig
 .rate button[aria-pressed="true"][data-r="like"], .stamp.like { background: var(--like); border-color: var(--like); color: var(--wall); }
 .rate button[aria-pressed="true"][data-r="meh"], .stamp.meh { background: var(--meh); border-color: var(--meh); color: var(--wall); }
 .rate button[aria-pressed="true"][data-r="no"], .stamp.no { background: var(--no); border-color: var(--no); color: var(--wall); }
+.rate button.wall { margin-left: 6px; }
+.rate button.wall[aria-pressed="true"], .stamp.wallmark { background: var(--ink); border-color: var(--ink); color: var(--wall); }
+.frame .stamp.wallmark { right: auto; left: 10px; }
 button:focus-visible, textarea:focus-visible { outline: 2px solid var(--like); outline-offset: 2px; }
 .status { font-family: var(--mono); font-size: 12px; color: var(--meh); margin-top: 10px; min-height: 1em; }
 .empty { color: var(--ink-dim); padding: 40px 0; font-family: var(--display); font-style: italic; font-size: 18px; }
@@ -66,7 +69,7 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid var(--like); o
   <header>
     <div>
       <h1>Fractal <em>wall</em> picks</h1>
-      <p class="lede">Candidates from automated zoom walks, curated by Claude. Rate each one; ratings steer the next round of searching. Open a piece for a full view and rate with keys 1&ndash;4, arrows to move.</p>
+      <p class="lede">Candidates from automated zoom walks, curated by Claude. Rate each one; ratings steer the next round of searching. Mark <b>Wall</b> separately for the few you would actually hang. Open a piece for a full view and rate with keys 1&ndash;4, arrows to move.</p>
     </div>
     <div class="tally" id="tally" aria-live="polite"></div>
   </header>
@@ -77,6 +80,7 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid var(--like); o
     <button id="f-like" data-f="like" aria-pressed="false">Like</button>
     <button id="f-meh" data-f="meh" aria-pressed="false">Meh</button>
     <button id="f-no" data-f="no" aria-pressed="false">No</button>
+    <button id="f-wall" data-f="wall" aria-pressed="false">Wall</button>
   </div>
   <div class="status" id="status"></div>
   <main id="rounds"><p class="empty">Loading the wall&hellip;</p></main>
@@ -92,7 +96,7 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid var(--like); o
     <div class="rate" id="lb-rate"></div>
     <textarea id="lb-note" placeholder="Notes for Claude (e.g. 'love the spirals, palette too dark')"></textarea>
     <div class="lb-nav"><button id="lb-prev">&larr; Prev</button><button id="lb-next">Next &rarr;</button><button id="lb-close">Close</button></div>
-    <div class="keys">1 love · 2 like · 3 meh · 4 no · ←/→ move · Esc close</div>
+    <div class="keys">1 love · 2 like · 3 meh · 4 no · W wall · ←/→ move · Esc close</div>
   </div>
 </div>
 
@@ -128,6 +132,7 @@ function visible(it) {
   const r = ratings[it.id]?.r;
   if (filter === "all") return true;
   if (filter === "unrated") return !r;
+  if (filter === "wall") return !!ratings[it.id]?.w;
   return r === filter;
 }
 
@@ -151,6 +156,7 @@ function render() {
       fr.append(img);
       const r = ratings[it.id]?.r;
       if (r) { const st = document.createElement("span"); st.className = "stamp " + r; st.textContent = r; fr.append(st); }
+      if (ratings[it.id]?.w) { const wm = document.createElement("span"); wm.className = "stamp wallmark"; wm.textContent = "wall"; fr.append(wm); }
       fr.addEventListener("click", () => openLb(idx));
       const cap = document.createElement("figcaption");
       const t = document.createElement("div"); t.className = "cap-title"; t.textContent = title(it);
@@ -175,6 +181,11 @@ function rateButtons(it) {
     b.addEventListener("click", (e) => { e.stopPropagation(); setRating(it, k); });
     box.append(b);
   }
+  const w = document.createElement("button"); w.className = "wall"; w.textContent = "Wall";
+  w.title = "I'd hang this one";
+  w.setAttribute("aria-pressed", String(!!ratings[it.id]?.w));
+  w.addEventListener("click", (e) => { e.stopPropagation(); toggleWall(it); });
+  box.append(w);
   return box;
 }
 
@@ -184,7 +195,8 @@ function tally() {
   for (const it of all) { const r = ratings[it.id]?.r; if (r) c[r]++; }
   const rated = c.love + c.like + c.meh + c.no;
   $("tally").innerHTML = "";
-  const parts = [["rated", `${rated}/${all.length}`], ["love", c.love], ["like", c.like], ["meh", c.meh], ["no", c.no]];
+  const walls = all.filter((it) => ratings[it.id]?.w).length;
+  const parts = [["rated", `${rated}/${all.length}`], ["love", c.love], ["like", c.like], ["meh", c.meh], ["no", c.no], ["wall", walls]];
   for (const [k, v] of parts) { const s = document.createElement("span"); s.append(k + " "); const b = document.createElement("b"); b.textContent = v; s.append(b); $("tally").append(s); }
 }
 
@@ -192,6 +204,13 @@ const pending = {};
 async function setRating(it, r) {
   const cur = ratings[it.id] || {};
   const next = { ...cur, r: cur.r === r ? null : r, t: Date.now() };
+  ratings[it.id] = next;
+  render(); if (!$("lb").hidden) fillLb();
+  await save(it.id, next);
+}
+async function toggleWall(it) {
+  const cur = ratings[it.id] || {};
+  const next = { ...cur, w: !cur.w, t: Date.now() };
   ratings[it.id] = next;
   render(); if (!$("lb").hidden) fillLb();
   await save(it.id, next);
@@ -207,7 +226,7 @@ async function saveNote(it, note) {
 async function save(id, data) {
   if (!db) { $("status").textContent = "Ratings can't be saved in this view (sign in to claude.ai to rate)."; return; }
   while (pending[id]) await pending[id];
-  const p = db.doc("ratings/" + id).set({ r: data.r || null, note: data.note || "", t: data.t }).catch((e) => {
+  const p = db.doc("ratings/" + id).set({ r: data.r || null, note: data.note || "", w: !!data.w, t: data.t }).catch((e) => {
     $("status").textContent = "Couldn't save that rating: " + (e?.message || e?.code || "unknown error") + ". Try again.";
   });
   pending[id] = p; await p; delete pending[id];
@@ -235,6 +254,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowRight") move(1);
   else if (e.key === "ArrowLeft") move(-1);
   else if ("1234".includes(e.key) && e.key.length === 1) setRating(order[lbIndex], R[+e.key - 1][0]);
+  else if (e.key === "w" || e.key === "W") toggleWall(order[lbIndex]);
 });
 document.querySelectorAll(".filters button").forEach((b) => b.addEventListener("click", () => {
   filter = b.dataset.f;
