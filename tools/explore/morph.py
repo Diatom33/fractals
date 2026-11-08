@@ -46,6 +46,7 @@ except FileNotFoundError:
 
 
 KS = (25, 80, 250)
+ONLY = ""  # --only <substring>: restrict seeds to regions whose label contains it
 
 
 def prec_for(width):
@@ -172,11 +173,12 @@ def busy_target(S, rng, mode):
 def walk(args):
     seed, levels = args
     rng = np.random.default_rng(seed)
-    if FAVORITES and rng.random() < 0.35:
+    seeds = [s for s in SEEDS if ONLY in s[3]] if ONLY else SEEDS
+    if FAVORITES and not ONLY and rng.random() < 0.35:
         sre, sim, w0, label, mode = FAVORITES[rng.integers(len(FAVORITES))]
     else:
-        sre, sim, w0, label, mode = SEEDS[rng.integers(len(SEEDS))]
-    if rng.random() < (0.45 if mode == "busy" else 0.2):
+        sre, sim, w0, label, mode = seeds[rng.integers(len(seeds))]
+    if not ONLY and rng.random() < (0.45 if mode == "busy" else 0.2):
         mode = "ridge" if mode == "busy" else "busy"
     bits = prec_for(w0 * 1e-6)
     gmpy2.get_context().precision = bits
@@ -208,7 +210,15 @@ def walk(args):
             if N is None or abs(complex(N - T)) > 4 * R:
                 continue
             s = mini_size(N, p, bits)
-            if not (0 < s < width * 0.05):
+            # Degenerate Newton results report absurd sizes (1e-101 at period 36).
+            if not (width * 1e-9 < s < width * 0.05):
+                continue
+            # Bulb nuclei (attached to a bigger component) frame as mostly
+            # interior: render a cheap preview of the k~60 frame and reject.
+            pw = s * 60
+            Zp = ref_orbit(N, min(60000, 40 * p + 4000))
+            Sp = perturb_grid(N, N, Zp, pw, 48, 36, min(60000, 40 * p + 4000))
+            if np.isnan(Sp).mean() > 0.4:
                 continue
             found = (N, p, s)
             break
@@ -246,7 +256,9 @@ def main():
     n = int(sys.argv[1]); out = sys.argv[2]
     seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else int(time.time())
     levels = int(sys.argv[sys.argv.index("--levels") + 1]) if "--levels" in sys.argv else 3
-    global KS
+    global KS, ONLY
+    if "--only" in sys.argv:
+        ONLY = sys.argv[sys.argv.index("--only") + 1]
     if "--ks" in sys.argv:
         KS = tuple(int(k) for k in sys.argv[sys.argv.index("--ks") + 1].split(","))
     jobs = [(seed * 1000 + i, levels) for i in range(n)]
