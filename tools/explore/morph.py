@@ -80,7 +80,7 @@ def ref_orbit(c, maxiter):
         zc = complex(z)
         out[n] = zc
         n += 1
-        if zc.real * zc.real + zc.imag * zc.imag > 1e6:
+        if zc.real * zc.real + zc.imag * zc.imag > 1e10:
             break
     return out[:n]
 
