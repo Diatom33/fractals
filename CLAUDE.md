@@ -45,6 +45,23 @@ wgpu's `copy_buffer_to_texture` requires `bytes_per_row` to be a multiple of 256
 ### vec2 * vec2 in WGSL
 `vec2<f32> * vec2<f32>` is component-wise multiplication, NOT scalar broadcast. To multiply a complex number by a scalar, use `scalar * vec` (f32 * vec2), not `vec2(scalar, 0.0) * vec`. The latter zeros the imaginary part.
 
+### Screen Orientation
+Standard math orientation: screen up = +imaginary. Shaders map pixel row y to
+`im = center_im - (y - (h-1)/2) * pixel_step.y` (escape, escape_perturb, newton;
+nebula_sample maps back with row 0 = view_max.y). GUI input (cursor readout,
+scroll anchor, drag, double-click, arrow keys) and the export strip offsets
+follow the same sign. Coordinates saved before this fix (Nov 2026) need their
+imaginary part negated.
+
+### Perturbation Reference & BLA
+Mandelbrot references prefer a minibrot nucleus near the view
+(`find_mandelbrot_reference`: atom-domain period on a grid, rug Newton,
+period <= 20000), else the view center. A nucleus orbit is stored for one period
+and pixels wrap at its end; `PerturbGpuParams.ref_off` carries (center - ref) in
+DS pixels. BLA uses `BLA_EPS` = 2^-24 (2^-10 visibly distorted the set) and a
+bottom-up level search. Accurate BLA only skips much at deep zooms; at ~1e-8 with
+huge max_iter it costs about what no-BLA does.
+
 ### Per-pixel Signal Conventions
 `final_z` per pixel is `(z.re, z.im, log2|dz|, arg(dz))` — the derivative is
 tracked in extended range (mantissa + exponent) through escape, perturbation,

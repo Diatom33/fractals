@@ -635,6 +635,19 @@ pub struct PerturbGpuParams {
     pub pixel_step_exp: i32,
     pub bla_num_levels: u32,    // 0 = BLA disabled
     pub _pad: u32,
+    /// (view center - reference) in pixels, double-single: (x_hi, x_lo, y_hi, y_lo).
+    /// Added to every pixel's offset so δc is relative to the reference.
+    pub ref_off: [f32; 4],
+}
+
+impl PerturbGpuParams {
+    pub fn ref_offset(params: &FractalParams, ref_re: &Float, ref_im: &Float, step_x: f64, step_y: f64) -> [f32; 4] {
+        let prec = params.center_re.prec().max(ref_re.prec());
+        let ox = Float::with_val(prec, &params.center_re - ref_re).to_f64() / step_x;
+        let oy = Float::with_val(prec, &params.center_im - ref_im).to_f64() / step_y;
+        let (xh, yh) = (ox as f32, oy as f32);
+        [xh, (ox - xh as f64) as f32, yh, (oy - yh as f64) as f32]
+    }
 }
 
 /// One BLA node: applies 2^level perturbation iterations as δ ← A·δ + B·δc.
@@ -962,6 +975,209 @@ pub fn compute_variant_reference_orbit(
 /// GPU-side BLA buffer sizing must use the same cap.
 pub const BLA_MAX_REF_LEN: usize = 250_000;
 
+/// BLA validity epsilon: a step may drop the δ² term when it is below eps
+/// relative to the linear term. 2^-24 (single-precision ulp, as in the
+/// literature) is visually exact against a CPU ground truth; the former
+/// 2^-10 let each skip carry ~1e-3 relative error, which the dynamics
+/// amplified into filaments displaced by tens of pixels plus streaks.
+pub const BLA_EPS: f64 = 1.0 / 16_777_216.0;
+
+/// Mandelbrot perturbation reference chosen for a view.
+/// Longest minibrot period find_mandelbrot_reference will solve for.
+pub const NUCLEUS_MAX_PERIOD: u32 = 20_000;
+
+pub struct MandelbrotReference {
+    pub re: Float,
+    pub im: Float,
+    /// Some(p) when the reference is a period-p nucleus: its orbit returns to
+    /// 0 after p steps, so only Z_0..Z_p is stored and pixels wrap around.
+    pub period: Option<u32>,
+}
+
+/// Reference for a Mandelbrot view: the nucleus of a minibrot in or near the
+/// view if one can be found, else the view center.
+///
+/// A view-center reference usually escapes after a few thousand iterations,
+/// so every pixel that iterates longer (above all interior pixels running to
+/// max_iter) keeps rebasing to the start of the orbit with a large δ, where no
+/// BLA step is valid. A nucleus orbit is periodic and never escapes; pixels
+/// near the minibrot track it for many iterations and BLA can skip most of
+/// them (with an accurate epsilon this is what makes BLA fast at all).
+///
+/// Period: atom domains. For a 7x7 grid of points over the search disk, the
+/// iteration n (< max_period) minimizing |z_n| is the period of the minibrot
+/// whose atom domain the point lies in; |z_n|_min ranks how deep inside. The
+/// grid orbits use float64 perturbation against the center's rug orbit, with
+/// rebasing (exact up to f64 rounding). Nucleus: Newton on z_p(c) = 0 in rug
+/// from the best-ranked points. Accepted only if it converges within
+/// 2·radius of the center.
+pub fn find_mandelbrot_reference(
+    center_re: &Float,
+    center_im: &Float,
+    radius: f64,
+    max_period: u32,
+    pixel_step: f64,
+) -> MandelbrotReference {
+    let fallback = || MandelbrotReference { re: center_re.clone(), im: center_im.clone(), period: None };
+    // Newton costs ~20 high-precision orbits of length p; cap p so a cache
+    // miss in the live viewer stays well under a second. Views needing longer
+    // periods fall back to the center reference (the pre-nucleus behavior).
+    let max_period = max_period.min(NUCLEUS_MAX_PERIOD);
+    if !(radius > 1e-280) || max_period < 2 {
+        return fallback();
+    }
+    let zoom_digits = (-pixel_step.log10()).max(16.0) as u32;
+    let prec = (zoom_digits * 4 + 96).max(160).max(center_re.prec());
+
+    // Center orbit (rug), stored as f64, until escape or max_period.
+    let cr = Float::with_val(prec, center_re);
+    let ci = Float::with_val(prec, center_im);
+    let mut zr = Float::with_val(prec, 0.0);
+    let mut zi = Float::with_val(prec, 0.0);
+    let mut t = Float::new(prec);
+    let mut orbit: Vec<(f64, f64)> = vec![(0.0, 0.0)];
+    for _ in 0..max_period {
+        t.assign(&zr * &zi);
+        zr.square_mut();
+        zr -= &Float::with_val(prec, zi.square_ref());
+        zr += &cr;
+        zi.assign(&t << 1u32);
+        zi += &ci;
+        let (a, b) = (zr.to_f64(), zi.to_f64());
+        orbit.push((a, b));
+        if a * a + b * b > 1e6 {
+            break;
+        }
+    }
+
+    // Atom-domain period for grid points: f64 perturbation with rebasing.
+    let atom_period = |dcr: f64, dci: f64| -> Option<(u32, f64)> {
+        let (mut dr, mut di) = (0.0f64, 0.0f64);
+        let mut m = 0usize;
+        let mut best = (0u32, f64::INFINITY);
+        for n in 1..=max_period {
+            let (zr, zi) = orbit[m];
+            // δ' = 2 Z δ + δ² + δc
+            let nr = 2.0 * (zr * dr - zi * di) + (dr * dr - di * di) + dcr;
+            let ni = 2.0 * (zr * di + zi * dr) + 2.0 * dr * di + dci;
+            dr = nr;
+            di = ni;
+            m += 1;
+            let (zr, zi) = orbit[m];
+            let (fr, fi) = (zr + dr, zi + di);
+            let az2 = fr * fr + fi * fi;
+            if az2 > 1e4 {
+                break;
+            }
+            if az2 < best.1 {
+                best = (n, az2);
+            }
+            if az2 < dr * dr + di * di || m + 1 >= orbit.len() {
+                dr = fr;
+                di = fi;
+                m = 0;
+            }
+        }
+        (best.0 >= 1 && best.1.is_finite()).then(|| (best.0, best.1.sqrt()))
+    };
+    let mut cands: Vec<(f64, u32, f64, f64)> = Vec::new();
+    for gy in -3i32..=3 {
+        for gx in -3i32..=3 {
+            let (ox, oy) = (gx as f64 * radius / 3.0, gy as f64 * radius / 3.0);
+            if ox.hypot(oy) > radius * 1.0001 {
+                continue;
+            }
+            if let Some((per, zmin)) = atom_period(ox, oy) {
+                cands.push((zmin, per, ox, oy));
+            }
+        }
+    }
+    cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut tried: Vec<u32> = Vec::new();
+    for &(_, p, ox, oy) in cands.iter() {
+        if tried.len() >= 4 {
+            break;
+        }
+        if tried.contains(&p) {
+            continue;
+        }
+        tried.push(p);
+        let sr0 = Float::with_val(prec, center_re) + ox;
+        let si0 = Float::with_val(prec, center_im) + oy;
+        if let Some(r) = newton_nucleus(&sr0, &si0, p, prec, radius, pixel_step) {
+            let dist = Float::with_val(prec, &r.0 - center_re).to_f64()
+                .hypot(Float::with_val(prec, &r.1 - center_im).to_f64());
+            if dist < 2.0 * radius {
+                return MandelbrotReference { re: r.0, im: r.1, period: Some(p) };
+            }
+        }
+    }
+    fallback()
+}
+
+/// Newton's method for the period-p nucleus nearest (c_re, c_im), in rug.
+fn newton_nucleus(
+    c_re: &Float,
+    c_im: &Float,
+    p: u32,
+    prec: u32,
+    radius: f64,
+    pixel_step: f64,
+) -> Option<(Float, Float)> {
+    let newton_step = |c_re: &Float, c_im: &Float| -> Option<(Float, Float)> {
+        let mut zr = Float::with_val(prec, 0.0);
+        let mut zi = Float::with_val(prec, 0.0);
+        let mut dr = Float::with_val(prec, 0.0);
+        let mut di = Float::with_val(prec, 0.0);
+        let mut a = Float::new(prec);
+        let mut b = Float::new(prec);
+        for _ in 0..p {
+            // dz = 2 z dz + 1
+            a.assign(&zr * &dr);
+            a -= &Float::with_val(prec, &zi * &di);
+            b.assign(&zr * &di);
+            b += &Float::with_val(prec, &zi * &dr);
+            dr.assign(&a << 1u32);
+            dr += 1u32;
+            di.assign(&b << 1u32);
+            // z = z^2 + c
+            a.assign(&zr * &zi);
+            zr.square_mut();
+            zr -= &Float::with_val(prec, zi.square_ref());
+            zr += c_re;
+            zi.assign(&a << 1u32);
+            zi += c_im;
+            if zr.to_f64().abs() > 1e10 || zi.to_f64().abs() > 1e10 {
+                return None;
+            }
+        }
+        let den = Float::with_val(prec, dr.square_ref()) + Float::with_val(prec, di.square_ref());
+        if den.is_zero() {
+            return None;
+        }
+        let sr = (Float::with_val(prec, &zr * &dr) + Float::with_val(prec, &zi * &di)) / &den;
+        let si = (Float::with_val(prec, &zi * &dr) - Float::with_val(prec, &zr * &di)) / &den;
+        Some((sr, si))
+    };
+    let tol = pixel_step * 1e-9;
+    let mut c_re = c_re.clone();
+    let mut c_im = c_im.clone();
+    for _ in 0..64 {
+        let (sr, si) = newton_step(&c_re, &c_im)?;
+        c_re -= &sr;
+        c_im -= &si;
+        let step = sr.to_f64().hypot(si.to_f64());
+        if !step.is_finite() || step > 4.0 * radius {
+            return None;
+        }
+        if step < tol {
+            return Some((c_re, c_im));
+        }
+    }
+    None
+}
+
+
 /// Mandelbrot-only reference orbit + BLA tree. The BLA tree lets the GPU skip
 /// many iterations at once when |δ| stays inside a validity radius.
 ///
@@ -978,6 +1194,7 @@ pub fn compute_mandelbrot_with_bla(
     pixel_step: f64,
     delta_c_max: f64,
     eps: f64,
+    period: Option<u32>,
 ) -> PerturbData {
     let zoom_digits = if pixel_step > 0.0 {
         (-pixel_step.log10()).max(16.0) as u32
@@ -998,8 +1215,12 @@ pub fn compute_mandelbrot_with_bla(
     // Cache 2·Z_n as ExtComplex for level-0 BLA construction
     let mut two_z: Vec<ExtComplex> = Vec::with_capacity(max_iter as usize + 1);
     let escape_r2 = 256.0_f64;
+    // A periodic (nucleus) reference only needs one period: Z_p ~ 0 = Z_0,
+    // and the shader rebases (wraps) when a pixel reaches the last entry.
+    let steps = period.map_or(max_iter, |p| p.min(max_iter));
+    let mut escaped = false;
 
-    for _ in 0..max_iter {
+    for _ in 0..steps {
         let zr_f64 = z_re.to_f64();
         let zi_f64 = z_im.to_f64();
         let zr_hi = zr_f64 as f32;
@@ -1030,8 +1251,18 @@ pub fn compute_mandelbrot_with_bla(
             let zi_hi = zi as f32;
             let zi_lo = (zi - zi_hi as f64) as f32;
             orbit.push([zr_hi, zi_hi, zr_lo, zi_lo]);
+            escaped = true;
             break;
         }
+    }
+    if !escaped {
+        // Final Z_steps, so BLA steps (which land at most at two_z.len()) and
+        // the end-of-reference rebase always find a stored orbit point.
+        let zr = z_re.to_f64();
+        let zi = z_im.to_f64();
+        let zr_hi = zr as f32;
+        let zi_hi = zi as f32;
+        orbit.push([zr_hi, zi_hi, (zr - zr_hi as f64) as f32, (zi - zi_hi as f64) as f32]);
     }
 
     let orbit_len = orbit.len() as u32;

@@ -22,6 +22,12 @@ struct RefOrbitCache {
     half_range_x: f64,
     half_range_y: f64,
     bla_num_levels: u32,
+    /// Mandelbrot: reference point (nucleus or center) and the envelope the
+    /// orbit/BLA tree were built for, so panning and small zooms reuse it.
+    ref_re: Float,
+    ref_im: Float,
+    built_delta_c_max: f64,
+    built_pixel_step: f64,
 }
 
 /// Align width so bytes_per_row (width * 4) is a multiple of COPY_BYTES_PER_ROW_ALIGNMENT (256).
@@ -780,6 +786,7 @@ impl GpuState {
         if use_perturb {
             let ft_idx = params.fractal_type.shader_index();
             let is_mandelbrot = params.fractal_type == crate::fractals::FractalType::Mandelbrot;
+            let half_diag = params.half_range_x.hypot(params.half_range_y).max(1e-300);
             let need_recompute = match &self.cached_ref_orbit {
                 None => true,
                 Some(prev) => {
@@ -790,27 +797,53 @@ impl GpuState {
                         && prev.bla_num_levels == 0
                         && prev.max_iter > 250_000
                         && params.max_iter <= 250_000;
-                    prev.center_re != params.center_re
-                        || prev.center_im != params.center_im
-                        || prev.max_iter < params.max_iter
+                    let common = prev.max_iter < params.max_iter
                         || prev.fractal_type != ft_idx
-                        || prev.julia_c != params.julia_c
-                        || prev.half_range_x != params.half_range_x
-                        || prev.half_range_y != params.half_range_y
-                        || recover_bla
+                        || recover_bla;
+                    if is_mandelbrot {
+                        // Reuse the reference while the view stays inside the
+                        // BLA envelope it was built for, we haven't zoomed in
+                        // 2x+ (nucleus search radius / precision), and the
+                        // offset stays well inside double-single pixel range.
+                        let dist = Float::with_val(128, &prev.ref_re - &params.center_re).to_f64()
+                            .hypot(Float::with_val(128, &prev.ref_im - &params.center_im).to_f64());
+                        common
+                            || half_diag + dist > prev.built_delta_c_max
+                            || pixel_step < prev.built_pixel_step * 0.5
+                            || dist > pixel_step * 2e4
+                    } else {
+                        common
+                            || prev.center_re != params.center_re
+                            || prev.center_im != params.center_im
+                            || prev.julia_c != params.julia_c
+                            || prev.half_range_x != params.half_range_x
+                            || prev.half_range_y != params.half_range_y
+                    }
                 }
             };
 
             if need_recompute {
                 self.ensure_ref_orbit_capacity(params.max_iter);
+                let mut ref_re = params.center_re.clone();
+                let mut ref_im = params.center_im.clone();
+                let mut built_delta_c_max = half_diag;
                 let (orbit_len, bla_num_levels) = if is_mandelbrot {
-                    let delta_c_max = (params.half_range_x.hypot(params.half_range_y)).max(1e-300);
-                    let eps = 1.0 / 1024.0;
-                    let perturb_data = crate::fractals::compute_mandelbrot_with_bla(
-                        &params.center_re, &params.center_im,
-                        params.max_iter, pixel_step,
-                        delta_c_max, eps,
+                    let search_r = half_diag.min(pixel_step * 1e4);
+                    let max_period = params.max_iter.min(crate::fractals::BLA_MAX_REF_LEN as u32);
+                    let reference = crate::fractals::find_mandelbrot_reference(
+                        &params.center_re, &params.center_im, search_r, max_period, pixel_step,
                     );
+                    let dist = Float::with_val(128, &reference.re - &params.center_re).to_f64()
+                        .hypot(Float::with_val(128, &reference.im - &params.center_im).to_f64());
+                    // 2x margin so panning reuses the orbit and BLA tree.
+                    built_delta_c_max = 2.0 * (half_diag + dist);
+                    let perturb_data = crate::fractals::compute_mandelbrot_with_bla(
+                        &reference.re, &reference.im,
+                        params.max_iter, pixel_step,
+                        built_delta_c_max, crate::fractals::BLA_EPS, reference.period,
+                    );
+                    ref_re = reference.re;
+                    ref_im = reference.im;
                     self.queue.write_buffer(
                         &self.ref_orbit_buffer,
                         0,
@@ -847,6 +880,7 @@ impl GpuState {
                     pixel_step_exp: ps_exp,
                     bla_num_levels: if disable_bla { 0 } else { bla_num_levels },
                     _pad: 0,
+                    ref_off: PerturbGpuParams::ref_offset(params, &ref_re, &ref_im, step_x, step_y),
                 };
                 self.queue.write_buffer(
                     &self.perturb_params_buffer,
@@ -863,6 +897,10 @@ impl GpuState {
                     half_range_x: params.half_range_x,
                     half_range_y: params.half_range_y,
                     bla_num_levels,
+                    ref_re,
+                    ref_im,
+                    built_delta_c_max,
+                    built_pixel_step: pixel_step,
                 });
             } else {
                 let cached = self.cached_ref_orbit.as_ref().unwrap();
@@ -871,6 +909,7 @@ impl GpuState {
                     pixel_step_exp: ps_exp,
                     bla_num_levels: if disable_bla { 0 } else { cached.bla_num_levels },
                     _pad: 0,
+                    ref_off: PerturbGpuParams::ref_offset(params, &cached.ref_re, &cached.ref_im, step_x, step_y),
                 };
                 self.queue.write_buffer(
                     &self.perturb_params_buffer,
