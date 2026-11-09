@@ -421,9 +421,17 @@ impl ExportContext {
         status: &dyn Fn(String),
     ) {
         const BAND_TARGET: f64 = 0.75;
+        const BAND_MAX: f64 = 2.0;
         let t_start = std::time::Instant::now();
         let mut last_status = std::time::Instant::now();
         let mut wg_row = 0u32;
+        // A band can't finish faster than its slowest pixel's serial run
+        // (~1 us/iteration without BLA): at high max_iter even one row of
+        // workgroups exceeds the target while the GPU sits mostly idle. `lat`
+        // estimates that floor so bands grow to fill the GPU instead of
+        // pinning at one row.
+        let mut lat = f64::INFINITY;
+        let mut prev: Option<(u32, f64)> = None;
         while wg_row < wg_y {
             let n_wg = (*band_wg).clamp(1, wg_y - wg_row);
             let mut gpu_params = base;
@@ -440,8 +448,24 @@ impl ExportContext {
             self.queue.submit(std::iter::once(encoder.finish()));
             self.device.poll(wgpu::Maintain::Wait);
             let dt = t.elapsed().as_secs_f64().max(1e-4);
-            let scaled = (n_wg as f64 * BAND_TARGET / dt).clamp(1.0, n_wg as f64 * 2.0);
-            *band_wg = (scaled as u32).clamp(1, wg_y);
+            // Latency floor: measured directly by a one-row band, or inferred
+            // when shrinking the band didn't shorten it.
+            let shrink_no_help = matches!(prev, Some((pn, pdt)) if n_wg < pn && dt > 0.9 * pdt);
+            if n_wg == 1 || shrink_no_help {
+                lat = dt;
+            } else {
+                lat = lat.min(dt);
+            }
+            prev = Some((n_wg, dt));
+            *band_wg = if dt > BAND_TARGET && lat.is_infinite() {
+                1
+            } else {
+                // Never aim past BAND_MAX: submits of several seconds trip the
+                // watchdog (seen at 4M iterations with ~4 s+ bands).
+                let target = if lat.is_finite() { BAND_TARGET.max(1.3 * lat).min(BAND_MAX.max(BAND_TARGET)) } else { BAND_TARGET };
+                let scaled = (n_wg as f64 * target / dt).ceil().clamp(1.0, n_wg as f64 * 2.0);
+                (scaled as u32).clamp(1, wg_y)
+            };
             wg_row += n_wg;
             if last_status.elapsed().as_secs_f64() > 2.0 {
                 let frac = wg_row as f64 / wg_y as f64;

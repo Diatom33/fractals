@@ -470,7 +470,7 @@ fn parse_fractal_args(args: &[String]) -> fractals::FractalParams {
     if let Some(pos) = args.iter().position(|a| a == "--iter") {
         if let Some(val) = args.get(pos + 1) {
             if let Ok(i) = val.parse::<u32>() {
-                params.max_iter = i.clamp(10, 1_000_000);
+                params.max_iter = i.clamp(10, 16_000_000);
             }
         }
     }
